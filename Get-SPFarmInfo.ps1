@@ -748,8 +748,8 @@ function Get-SPDiagnosticFarmBuildInfo
 
     if($countOfVerboseEx -gt 0 -or $countOfVerboseEx -gt 0 -or $countOfVerboseEvents)
     {
-        $finding.WarningMessage = "TraceSeverity is set to VerboseEx on $countOfVerboseEx LogLevel(s). This may cause performance issues"
         $finding.Severity = [SPDiagnostics.Severity]::Warning
+        $finding.WarningMessage = "TraceSeverity is set to VerboseEx on $countOfVerboseEx LogLevel(s). This may cause performance issues"
     }
     return $finding
 
@@ -1451,9 +1451,9 @@ function Get-SPDiagnosticSearchFindings
         {
             $ssaName = $ssa.DisplayName
             $ssaFindings.Severity = [SPDiagnostics.Severity]::Warning
-            $ssaFindings.Description+="<li style='color:red'>We have detected that your 'SSA' needs to be upgraded!</li>"
-            $ssaFindings.Description+="<li>In order to perform this action, please run the following command: </li>" 
-            $ssaFindings.Description+="<ul style='color:#0072c6'><div class=`"code`">`Upgrade-SPEnterpriseSearchServiceApplication '$ssaName'</div></ul>"
+            $ssaFindings.WarningMessage+="<li style='color:red'>We have detected that your 'SSA' needs to be upgraded!</li>"
+            $ssaFindings.WarningMessage+="<li>In order to perform this action, please run the following command: </li>" 
+            $ssaFindings.WarningMessage+="<ul style='color:#0072c6'><div class=`"code`">`Upgrade-SPEnterpriseSearchServiceApplication '$ssaName'</div></ul>"
         }
         if($ssa.CloudIndex -eq $True)
         {
@@ -1616,10 +1616,10 @@ function Get-SPDiagnosticsSSATLegacyAdmin
     if($null -eq $LAC.ServerName)
     {
         $finding.Severity = [SPDiagnostics.Severity]::Critical
-        $finding.Description+="<li>We detected the 'Legacy Admin Component' is empty.</li>"
-        $finding.Description+="<li>The SSA will be broken when this is the case. Accessing 'Content Sources', 'Crawl Rules', 'ServerNameMappings' should be inaccessible.</li>"
-        $finding.Description+="<li>Try to repair this by running the following command:</li>" 
-        $finding.Description+="<ul style='color:#0072c6'><div class=`"code`">`Set-SPEnterpriseSearchAdministrationComponent -SearchApplication 'ssa Name' -SearchServiceInstance AdminServerName -Force</div></ul>"
+        $finding.WarningMessage+="<li>We detected the 'Legacy Admin Component' is empty.</li>"
+        $finding.WarningMessage+="<li>The SSA will be broken when this is the case. Accessing 'Content Sources', 'Crawl Rules', 'ServerNameMappings' should be inaccessible.</li>"
+        $finding.WarningMessage+="<li>Try to repair this by running the following command:</li>" 
+        $finding.WarningMessage+="<ul style='color:#0072c6'><div class=`"code`">`Set-SPEnterpriseSearchAdministrationComponent -SearchApplication 'ssa Name' -SearchServiceInstance AdminServerName -Force</div></ul>"
 
     }
     else
@@ -1656,12 +1656,12 @@ function Get-SPDiagnosticsSSACDProp
             if($row -match "net.tcp:///")
             {
                 $finding.Severity = [SPDiagnostics.Severity]::Critical
-                $finding.Description+='<li style="color:red">The ContentDistributor Property on this SSA is corrupt. The crawl will not continue until this is resolved</li>'
-                $finding.Description+='<li>In the ULS, on the crawl servers, you should see this HResult being thrown: 0x80131537.</li>'
-                $finding.Description+='<li>The current property is set to: </li>'
-                $finding.Description+='<ul style="color:darkblue">' + "  {0}" -f $row + '</ul>'
-                $finding.Description+='<li>It should appear like:  </li>'
-                $finding.Description+='<ul style="color:darkblue">' + "  {0}" -f $row.replace("net.tcp:///", "net.tcp://servername/") + '</ul>'
+                $finding.WarningMessage+='<li style="color:red">The ContentDistributor Property on this SSA is corrupt. The crawl will not continue until this is resolved</li>'
+                $finding.WarningMessage+='<li>In the ULS, on the crawl servers, you should see this HResult being thrown: 0x80131537.</li>'
+                $finding.WarningMessage+='<li>The current property is set to: </li>'
+                $finding.WarningMessage+='<ul style="color:darkblue">' + "  {0}" -f $row + '</ul>'
+                $finding.WarningMessage+='<li>It should appear like:  </li>'
+                $finding.WarningMessage+='<ul style="color:darkblue">' + "  {0}" -f $row.replace("net.tcp:///", "net.tcp://servername/") + '</ul>'
             }
             else
             {
@@ -1846,8 +1846,8 @@ function Get-SPDiagnosticsSSAContentSources
                     }
                     if (!$inUserPolicy) 
                     {
-                     $csFinding.WarningMessage+= $crawlAccount + " is NOT defined in the Web App's User Policy "
-                     $csFinding.Severity = [SPDiagnostics.Severity]::Warning   
+                        $csFinding.Severity = [SPDiagnostics.Severity]::Warning   
+                        $csFinding.WarningMessage+= $crawlAccount + " is NOT defined in the Web App's User Policy "
                     }
                   }
                   else
@@ -3387,6 +3387,7 @@ function Get-SPDiagnosticsSearchHealthCheck()
     elseif ($global:serviceDegraded)
     {
         $SearchTopologyHealthCheck.Severity = [SPDiagnostics.Severity]::Warning
+        $SearchTopologyHealthCheck.WarningMessage += " Search Service Overall State: Degraded "
     }
     else
     {
