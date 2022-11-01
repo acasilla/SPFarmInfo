@@ -22,8 +22,22 @@ param(
     [Parameter(Position=1,HelpMessage="Displays Help associated with the SPFarmInfo script")]
     [switch]$Help,
     [Parameter(Position=2,HelpMessage="Queries MSI and Update Session for Patch Information related to SharePoint")]
-    [switch]$PatchInfo
+    [switch]$PatchInfo,
+    [Parameter(Position=3,HelpMessage="Performs Data Collection to assist in troubleshooting Usage Analysis and Reporting Issues. Requires -SiteUrl parameter")]
+    [switch]$UsageAndReporting,
+    [Parameter(Position=4,HelpMessage="SiteUrl parameter, required for UsageAndReporting check")]
+    [string]$SiteUrl,
+    [Parameter(Position=5,HelpMessage="Skips the indepth Search Health Check")]
+    [switch]$SkipSearchHealthCheck,
+    [Parameter(Position=6,HelpMessage="Performs checks on whether configurations necessary for TLS1.2 and ciphers necessary for connecting to Azure Front Door (M365) are done")]
+    [switch]$TLS
 )
+
+if([System.IntPtr]::Size -lt 8)
+{
+    Write-Error "Get-SPFarmInfo Is not supported on x86 Powershell/Powershell ISE instances"
+    exit
+}
 
 #region CoreFramework
 
@@ -69,7 +83,7 @@ namespace SPDiagnostics
         }
         private Severity _severity;
         public string Name;
-        public string Description;
+        public List<string> Description;
         public List<string> WarningMessage;
         public List<Uri> ReferenceLink;
         public object InputObject;
@@ -150,7 +164,7 @@ function New-SPDiagnosticFinding
         $Name,
 
         [Parameter()]
-        [String]
+        [String[]]
         $Description,
 
         [Parameter()]
@@ -244,7 +258,9 @@ function Write-DiagnosticFindingFragment
     param (
         [Parameter(Mandatory=$false,ValueFromPipeline=$true)]
         [SPDiagnostics.Finding]
-        $Finding
+        $Finding,
+
+        [switch]$ExcludeChildFindings
     )
     try
     {
@@ -271,7 +287,11 @@ function Write-DiagnosticFindingFragment
         {
             $preContent+="<div class=`"warning-message`"> {0} </div><br>" -f $warningMessage
         }
-        $preContent+="<div class=`"description`">{0}</div>" -f $Finding.Description
+        
+        foreach($desc in $finding.Description)
+        {
+            $preContent+="<div class=`"description`">{0}</div>" -f $desc
+        }
         
         foreach($link in $Finding.ReferenceLink)
         {
@@ -283,13 +303,25 @@ function Write-DiagnosticFindingFragment
         if($null -ne $Finding.InputObject)
         {
             #Account for objects that only have a single property, ConverTo-Html does not display the property name if there is only one
-            $properties = Get-Member -InputObject $Finding.InputObject -MemberType Properties
+            if($Finding.InputObject.GetType().FullName -match "System.Collections.Generic.Dictionary``2" -or $finding.InputObject -is [System.Collections.Hashtable])
+            {
+                $Finding.InputObject = $Finding.InputObject.GetEnumerator() | Select-Object Key, Value
+                $Finding.Format = "Table"
+            }
+            if($finding.InputObject -is [System.Array] -and $finding.InputObject.Count -gt 0)
+            {
+                $properties = Get-Member -InputObject $Finding.InputObject[0] -MemberType Properties -ErrorAction Stop
+            }
+            else 
+            {
+                $properties = Get-Member -InputObject $Finding.InputObject -MemberType Properties -ErrorAction Stop
+            }            
+            
             if($properties.Count -eq 1)
             {
                 $property =  $properties[0]
                 $propertyName = $property.Name
                 $htmlFragment = $Finding.InputObject | ConvertTo-Html -Property $propertyName -PreContent $preContent -As $Finding.Format -Fragment
- 
             }
             else
             {
@@ -301,10 +333,13 @@ function Write-DiagnosticFindingFragment
             $htmlFragment = $preContent
         }
 
-        foreach($child in $Finding.ChildFindings)
+        if(!$ExcludeChildFindings)
         {
-            $childContent = Write-DiagnosticFindingFragment -Finding $child
-            $htmlFragment+=$childContent
+            foreach($child in $Finding.ChildFindings)
+            {
+                $childContent = Write-DiagnosticFindingFragment -Finding $child
+                $htmlFragment+=$childContent
+            }
         }
 
         $htmlFragment+=$postContent
@@ -433,16 +468,28 @@ $expandAllJS = "// Reference the toggle link
     });
 
     }, false);"
+    
 
     $html = "<!DOCTYPE html><head><Title>SPFarmReport - {0}</Title></head><body>" -f $build
     $html+=$globalCss
+    $html+="<div id=`"topInfo`""
     $html+="<h1>SPFarmReport - {0}</h1>" -f $build
     $html+="<p style=`"font-style: italic;`">Generated at {0} UTC</p>" -f [datetime]::UtcNow.ToString("MM/dd/yyyy hh:mm:ss tt")    
     $html+="<a href='#/' id='expAll' class='col'>Expand All</a>"
+    $html+="<div id=`"ieWarning`" />
+    <script type=`"text/javascript`">
+        var isIe = navigator.userAgent.indexOf(`"Trident`") > -1;
+        if(isIe){
+            document.getElementById(`"expAll`").style.display = `"none`";
+            document.getElementById(`"ieWarning`").innerHTML = `"This report is not optimized for IE for best results open this report in Microsoft Edge.`";
+        }
+    </script>"
+    $html+="</div>"
 
     # Identify "Critical" and "Warning" findings so that they can be promoted
     $criticalFindings = Get-SPErrorFindings -Findings $Findings -Severity Critical
     $warningFindings = Get-SPErrorFindings -Findings $Findings -Severity Warning
+    $informationalFindings = Get-SPErrorFindings -Findings $Findings -Severity Informational
     
     # If there are critical findings create a "review-section" for critical findings at the top of the report
     if($criticalFindings.Count -ge 1)
@@ -454,7 +501,7 @@ $expandAllJS = "// Reference the toggle link
             {
                 $expand = $finding.Expand
                 $finding.Expand = $true
-                $fragment = Write-DiagnosticFindingFragment -Finding $finding
+                $fragment = Write-DiagnosticFindingFragment -Finding $finding -ExcludeChildFindings
                 $html+=$fragment
                 $finding.Expand = $expand
             }
@@ -463,7 +510,7 @@ $expandAllJS = "// Reference the toggle link
                 Write-Warning $_
             }
         }
-        $html+="</div><p />"
+        $html+="</div><br>"
     }
 
     # Similar to critical findings promote any warnings that may be present
@@ -474,7 +521,7 @@ $expandAllJS = "// Reference the toggle link
         {
             try
             {
-                $fragment = Write-DiagnosticFindingFragment -Finding $finding
+                $fragment = Write-DiagnosticFindingFragment -Finding $finding -ExcludeChildFindings
                 $html+=$fragment
             }
             catch
@@ -482,7 +529,27 @@ $expandAllJS = "// Reference the toggle link
                 Write-Warning $_
             }
         }
-        $html+="</div>"
+        $html+="</div><br>"
+    }
+
+
+    # Similar to critical findings promote any warnings that may be present
+    if($informationalFindings.Count -ge 1)
+    {
+        $html+="<div class=`"review-section`" style=`"border-color:black`"><div class=`"heading`">Informational Items</div>"
+        foreach($finding in $informationalFindings)
+        {
+            try
+            {
+                $fragment = Write-DiagnosticFindingFragment -Finding $finding -ExcludeChildFindings
+                $html+=$fragment
+            }
+            catch
+            {
+                Write-Warning $_
+            }
+        }
+        $html+="</div><br>"
     }
     
     foreach($finding in $Findings)
@@ -768,11 +835,16 @@ function Get-SPDiagnosticServersInFarm
             $productStatus = $spProduct.GetStatus($svr.DisplayName) | Select-Object -Unique
 
 
-            if($productStatus -eq "UpgradeBlocked" -or $productStatus -eq "InstallRequired" -or $productStatus -eq "UpgradeInProgress")
+            if($productStatus -ine "NoActionRequired" -and $productStatus -ine "UpgradeAvailable")
             {
                 #$message = "'" + $productStatus.ToString() + "'" + " has been detected on server: " + $svr.DisplayName + ". This puts the farm\server in an 'UNSUPPORTED' and unstable state and patching\psconfig needs to be completed before any further troubleshooting. Support cannot provided until this is resolved"
                 #Write-Warning -Message $message
                 $productStatusBool = $true
+                $productStatusLevel = [SPDiagnostics.Severity]::Warning
+                if($productStatus -ieq "UpgradeBlocked" -or $productStatus -ieq "InstallRequired" -or $productStatus -ieq "UpgradeInProgress" )
+                {
+                    $productStatusLevel = [SPDiagnostics.Severity]::Critical
+                }
             }
 
         }
@@ -809,7 +881,7 @@ function Get-SPDiagnosticServersInFarm
 
     if($productStatusBool)
     {
-        $finding.Severity = [SPDiagnostics.Severity]::Critical
+        $finding.Severity = $productStatusLevel
         $finding.WarningMessage = "Inconsistent patch or upgrade state identified, please complete relevant actions on the identified servers"
         $finding.Expand = $false
     }
@@ -1319,7 +1391,7 @@ function Get-SPDiagnosticsSPSecurityTokenServiceConfigFinding
     {
         $finding.Severity = [SPDiagnostics.Severity]::Warning
         $finding.WarningMessage+="MaxLogonTokenCacheItems may be too low when SAML authentication is used, review the documentation and make necessary adjustments to avoid unnecessary reauthentication"
-        $finding.Description+=("Example PowerShell to set the MaxLogonTokenCacheItems<div class=`"code`">`$sts = Get-SPSecurityTokenServiceConfig<br>`$sts.MaxLogonTokenCacheItems = 3000<br>`$sts.Update()</div><br/>")
+        $finding.Description+=("Example PowerShell to set the MaxLogonTokenCacheItems<div class=`"code`">`$sts = Get-SPSecurityTokenServiceConfig<br>`$sts.MaxLogonTokenCacheItems = 3000<br>`$sts.Update()</div>Once the above PowerShell is performed an IISReset must be done on ALL servers in the farm.<br>")
     }
     $cert = $stsConfig.LocalLoginProvider.SigningCertificate
     $finding.ChildFindings.add((Get-SPDiagnosticFindingCertInfo $cert "Security Token Service" "STS"))
@@ -1464,7 +1536,10 @@ function Get-SPDiagnosticSearchFindings
             $ssaFindings.Description+="<ul style='color:#727272'>  $spoTenantUri</ul>"
         }
 
-        $ssaFindings.ChildFindings.Add((Get-SPDiagnosticsSearchHealthCheck -searchApplication $ssa))
+        if(!$SkipSearchHealthCheck)
+        {
+            $ssaFindings.ChildFindings.Add((Get-SPDiagnosticsSearchHealthCheck -searchApplication $ssa))
+        } 
         $ssaFindings.ChildFindings.Add((Get-SPDiagnosticsSSAObject -searchApplication $ssa))
         $ssaFindings.ChildFindings.Add((Get-SPDiagnosticsSSAProxyPartition -searchApplication $ssa))
         $ssaFindings.ChildFindings.Add((Get-SPDiagnosticsSSATimerJobs -searchapplication $ssa))
@@ -3400,10 +3475,1355 @@ function Get-SPDiagnosticsSearchHealthCheck()
 
 }
 
+function Select-SPDiagnosticSSA
+{
+    $ssas = @(Get-SPEnterpriseSearchServiceApplication)
+
+    if($ssas.Count -eq 1)
+    {
+        $script:ssa = $ssas[0]
+    }
+    else
+    {
+        $menu = @{}
+        for($i=1;$i -le $ssas.count; $i++)
+        {
+            Write-Host "$i. $($ssas[$i-1].name)"
+            $menu.Add($i,($ssas[$i-1].name))
+        }
+        ""
+        [int]$ans = Read-Host 'Select Primary SSA for Usage Analysis and Reporting'
+        $selection = $menu.Item($ans)
+        $script:ssa = Get-SPEnterpriseSearchServiceApplication $selection
+    }
+}
+
+function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
+{
+    $Script:UsageLogDir = ""
+    $Script:SPFarmBuild = $null;
+    $script:ImportProgressFile = "importprogress.ini"
+    
+    # Some things can only be done on certain version of Powershell and/or SharePoint. 
+    $Script:CheckServiceACLs = $false
+
+    $Script:TimerServiceAccount = $null
+    $script:W3WPAppPoolAccount = $null
+    $Script:ReportingFeatureId = "7094bd89-2cfe-490a-8c7e-fbace37b4a34"
+    $script:UsageAndHealthDataCollectionProxyName = "Usage and Health Data Collection Proxy"
+    $script:SPFarm = $null
+    $script:UsageDefinitionsWithReceivers = @("Analytics Usage","File IO","Page Requests","Simple Log Event Usage Data_SPUnifiedAuditEntry")
+
+    if($PSversionTable.PSversion.Major -ge 5)
+    {
+        $Script:CheckServiceACLs = $true
+    }
+    
+    function GetSPVersion($buildPrefix)
+    {
+        $farm = [Microsoft.SharePoint.Administration.SPFarm]::Local
+        If($farm.BuildVersion.Major -eq 16 -or $farm.BuildVersion.Major -eq 15)
+        {
+            if($farm.BuildVersion.Major -eq 16)
+            {
+                if($farm.BuildVersion.Build -ge 14326)
+                {
+                    $buildFoo = "SPSE"
+                }
+                elseif($farm.BuildVersion.Build -ge 10337 -and $farm.BuildVersion.Build -lt 14320)
+                {
+                    $buildFoo = "2019"
+                }
+                else
+                {
+                    $buildFoo = "2016"
+                }
+            }
+            else
+            {
+                $buildFoo = "2013"
+            }
+    
+        }
+        elseIf($farm.BuildVersion.Major -eq 14)
+        {
+            Write-Warning "The support for SharePoint 2010 has ended, please update this farm to a newer version of SharePoint.. Aborting Script"
+            exit
+        }
+        else
+        {
+            Write-Warning "Unsupported Version of SP... Aborting script"
+            exit
+        }
+        return $buildFoo
+    }
+        
+    function Get-SPAnalyticsTopologyDiagnosticFinding($ssa)
+    {
+        $AnalyticsTopology = $ssa.AnalyticsTopology
+    
+        $finding = New-SPDiagnosticFinding -Name "Analytics Topology" -Severity Default -Format List -InputObject $AnalyticsTopology
+        
+        if($null -ne $AnalyticsTopology)
+        {
+            $components = $ssa.AnalyticsTopology.GetComponents()
+            foreach($component in $components)
+            {
+                $componentFinding = New-SPDiagnosticFinding -Name $component.Name -Severity Default -Format List -InputObject $component
+                $finding.ChildFindings.Add($componentFinding)
+            }
+        }
+        else {
+            $finding.WarningMessage += "No Analytics Topology Found"
+            $finding.Severity = [SPDiagnostics.Severity]::Critical
+        }
+    
+    
+        return $finding
+    }
+        
+    function Get-SPDiagnosticSitePropertiesOfInterest($site)
+    {
+        $SPReportingFeatureEnabled = Get-SPReportingFeatureEnabled $site
+    
+        $tempSite = $site | select-object Url, CompatibilityLevel
+        $tempSite | Add-Member -MemberType NoteProperty -Name "SPReportingFeatureEnabled" -Value $SPReportingFeatureEnabled
+        
+        $finding = New-SPDiagnosticFinding -Name "Site and WebRoot Properties" -Severity Default -InputObject $tempSite -Format Table
+        
+        if(!$SPReportingFeatureEnabled)
+        {
+            $finding.Severity = [SPDiagnostics.Severity]::Critical
+            $finding.WarningMessage = "Reporting Feature is not enabled on this site, reporting will not be available or will be stale"
+        }
+        
+        $finding.ChildFindings.Add((Get-SPDiagnosticWebPropertiesOfInterest $site.RootWeb))
+        $finding.ChildFindings.Add((Get-SPDiagnosticWebApplicationPropertiesOfInterest $site.WebApplication))
+        
+        $webs = $site.AllWebs
+        $webFinding =  New-SPDiagnosticFinding -Name "All Webs" -Severity Default -InputObject $null -Format Table -Expand
+    
+        foreach($web in $webs)
+        {
+            $webFinding.ChildFindings.Add((Get-SPDiagnosticWebPropertiesOfInterest $web))
+        }
+    
+        $finding.ChildFindings.Add($webFinding)
+    
+        return $finding
+    }
+    
+    function Get-SPReportingFeatureEnabled($site)
+    {
+        $SPReportingFeatureEnabled = ($null -ne (Get-SPFeature -Identity $Script:ReportingFeatureId -ErrorAction SilentlyContinue -Site $site))
+    
+        return $SPReportingFeatureEnabled
+        
+    }
+    
+    function Get-SPDiagnosticWebPropertiesOfInterest($web)
+    {
+        $tempWeb = $web | Select-Object Url, NoCrawl
+        $finding = New-SPDiagnosticFinding -Name "Web Properties" -Severity Default -InputObject $tempWeb -Format Table
+        if($tempWeb.NoCrawl -eq $true)
+        {
+            $finding.WarningMessage = 'NoCrawl is $true on this web. This may prevent accurate reporting, site views, etc,.'
+            $finding.Severity = [SPDiagnostics.Severity]::Warning
+        }
+    
+        return $finding
+    }
+    function Get-SPDiagnosticWebApplicationPropertiesOfInterest($webApp)
+    {
+        $tempWebApp = $webApp | select-object AllowAnalyticsCookieForAnonymousUsers
+        $tempWebApp  | Add-Member -MemberType NoteProperty -Name "Application Pool Name" -Value $webApp.ApplicationPool.Name
+        $tempWebApp  | Add-Member -MemberType NoteProperty -Name "Application Pool UserName" -Value $webApp.ApplicationPool.Username
+        $tempWebApp  | Add-Member -MemberType NoteProperty -Name "Application Managed Account" -Value $webApp.ApplicationPool.ManagedAccount
+    
+        $script:W3WPAppPoolAccount = $webApp.ApplicationPool.Username
+        $finding = New-SPDiagnosticFinding -Name "WebApp Properties" -Severity Default -InputObject $tempWebApp -Format List
+        
+        return $finding
+    }
+    
+    function Get-SPDiagnosticOWSTimerService()
+    {
+        $OWSTimerService = Get-WmiObject -Class Win32_Service | where-object{$_.Name -like "SPTimerV4"}
+    
+        $finding = New-SPDiagnosticFinding -Name "OWSTimer/SPTimerV4" -Severity Default -Format List
+    
+        if($null -ne $OWSTimerService)
+        {
+            $finding.InputObject = $OWSTimerService
+            $Script:TimerServiceAccount  = $OWSTimerService.StartName
+        }
+        else
+        {
+            $finding.Severity = [SPDiagnostics.Severity]::Critical
+            $finding.WarningMessage = "Cannot Identify the SPTimerV4 Service"
+        }
+    
+        return $finding
+    }
+    
+    function Get-SPDiagnosticFindingSPUsageManager()
+    {
+        $SPUsageManager = [Microsoft.SharePoint.Administration.SPUsageManager]::Local
+        $finding = New-SPDiagnosticFinding -Name "SPUsageManager Details" -Severity Default -Format List
+    
+        if($null -eq $SPUsageManager)
+        {
+            $finding.Severity = [SPDiagnostics.Severity]::Warning
+            $finding.WarningMessage = "The SPUSageManager is missing for this farm. Usage Analytics will not function"
+        }
+        else {
+            $finding.InputObject = $SPUsageManager
+    
+            if($SPUsageManager.LoggingEnabled -eq $false)
+            {
+                $finding.Severity = [SPDiagnostics.Severity]::Warning
+                $finding.WarningMessage = "LoggingEnabled is false on the SPUsageManager. Usage Analytics will not function."
+            }
+            <# Action when all if and elseif conditions are false #>
+        }
+    
+        return $finding
+    }
+    
+    
+    function Get-SPUsageServiceDiagnosticFinding()
+    {
+        $finding = New-SPDiagnosticFinding -Name "SPUsageService Details" -Severity Default -Format List
+    
+        $SPUsageService = Get-SPUsageService
+        if($null -eq $SPUsageService)
+        {
+            $finding.WarningMessage = "There is no SPUsageService. This will prevent .usage logs from being created"
+            $finding.Severity = [SPDiagnostics.Severity]::Critical
+            return $finding
+        }
+    
+        $finding.InputObject = $SPUsageService
+    
+        $instances = $SPUsageService.Instances | Select-Object Server, Status, NeedsUpgrade, CanUpgrade, IsBackwardsCompatible, ID, Parent, Version | sort-object Server
+    
+        if($SPUsageService.LoggingEnabled -eq $false)
+        {
+            $finding.WarningMessage += "SPUsageService Logging is disabled. This will prevent .usage logs from being created"
+            $finding.Severity = [SPDiagnostics.Severity]::Critical
+        }
+    
+        if($SPUsageService.Status.ToString().ToLower() -ne "online")
+        {
+            $finding.WarningMessage += "SPUsageService Status is not online. This will prevent job-usage-log-file-import from processing .usage files and updating importprogress.ini"
+            $finding.Severity = [SPDiagnostics.Severity]::Critical
+        }
+    
+    
+        if($null -ne $instances)
+        {
+            $instancesFinding = New-SPDiagnosticFinding -Name "SPUsageService Instances" -Severity Default -Format Table -InputObject $instances
+    
+            foreach($instance in $instances)
+            {
+                $status = $instance.Status
+    
+                if($status -ne "Online")
+                {
+                    $instanceFinding = New-SPDiagnosticFinding -Name "SPUsageService Instance" -Severity Default -Format List -InputObject $instance
+                    $server = $instance.Server
+                    $instanceFinding.WarningMessage = "The SPUsageService Instance for $server is $status rather than Online. This will prevent job-usage-log-file-import from processing .usage files on this server if it's a WFE"
+                    $instancesFinding.ChildFindings.Add($instanceFinding)
+                }
+
+            }
+
+            $finding.ChildFindings.Add($instancesFinding)
+        }
+        else {
+            $finding.WarningMessage += "There are no SPUSageService Instances, this will prevent .Usage logs from being processed"
+            $finding.Severity = [SPDiagnostics.Severity]::Critical
+        }
+    
+        $applications = $SPUsageService.Applications
+        if($null -eq $applications)
+        {
+            $finding.WarningMessage += "There are no SPUSageService Applications, this will prevent .Usage logs from being processed. See New-SPUSageApplication"
+            $finding.Severity = [SPDiagnostics.Severity]::Critical
+        }
+        else {
+            $applicationFinding = New-SPDiagnosticFinding -Name "SPUSageApplication Instances" -Severity Default -Format List -InputObject $applications
+            $finding.ChildFindings.Add($applicationFinding)
+        }
+    
+    
+        $Script:UsageLogDir = $SPUsageService.UsageLogDir
+    
+        if(!$Script:UsageLogDir.EndsWith("\"))
+        {
+            $Script:UsageLogDir += "\"
+        }
+    
+        $jobDefinitionsFinding = New-SPDiagnosticFinding -Name "Job Definitions on SPUsageService" -Severity Default -Format Table
+    
+        $jobDefinitionsCount = [PSCustomObject]@{
+            "Job Definition Count" = $SPUsageService.JobDefinitions.Count
+        }
+    
+        $jobDefinitionsFinding.InputObject = $jobDefinitionsCount
+    
+        foreach($job in $SPUsageService.JobDefinitions)
+        {
+           
+            $jobname = $Job.Name
+            $jobDefinitionFinding = New-SPDiagnosticFinding -Name "Job Definitions: $jobname" -Severity Default -Format List -InputObject $job
+            $JobHistoryFindingEntries = New-SPDiagnosticFinding -Name "Most Recent 20 Job History Entries" -Severity Default -Format Table 
+
+            $JobHistoryEntries = $job.HistoryEntries | Sort-Object -Descending StartTime | Select-Object Servername, Status, StartTime, EndTime, ErrorMessage -First 20
+            $JobHistoryFindingEntries.InputObject = $JobHistoryEntries
+
+            $jobDefinitionFinding.ChildFindings.Add($JobHistoryFindingEntries)
+            if($job.LastRunTime -eq [System.DateTime]::MinValue)
+            {
+                $jobDefinitionFinding.Severity = [SPDiagnostics.Severity]::Warning
+                $jobDefinitionFinding.WarningMessage += "$jobname has not run"
+            }
+            elseif($job.LastRunTime -le [System.DateTime]::Now.AddDays(-1))
+            {
+                $jobDefinitionFinding.Severity = [SPDiagnostics.Severity]::Warning
+                $jobDefinitionFinding.WarningMessage += "$jobname Has Not run in over a day"
+            }
+            
+            if($job.IsDisabled  -eq $true)
+            {
+                $jobDefinitionFinding.Severity = [SPDiagnostics.Severity]::Warning
+                $jobDefinitionFinding.WarningMessage += "$jobname is disabled"
+            }elseif($RunNow)
+            {
+                Write-Host " Running Job: $job now"
+                $job.RunNow()
+            }
+    
+            $jobDefinitionsFinding.ChildFindings.Add($jobDefinitionFinding)
+        }
+    
+        $finding.ChildFindings.Add($jobDefinitionsFinding)
+    
+        $JobHistoryFindingEntries = New-SPDiagnosticFinding -Name "Most Recent 20 Job History Entries On SPUsageService" -Severity Default -Format Table 
+        
+        $JobHistoryEntries = $SPUsageService.JobHistoryEntries | Sort-Object -Descending StartTime | Select-Object Servername, Status, StartTime, EndTime, ErrorMessage -First 20
+    
+        $JobHistoryFindingEntries.InputObject = $JobHistoryEntries
+    
+        $finding.ChildFindings.Add($JobHistoryFindingEntries)
+    
+        return $finding
+    }
+    
+    function Get-SPUsageDefinitionDiagnosticFinding()
+    {
+        $finding = New-SPDiagnosticFinding -Name "SPUsageDefinitions" -Severity Default -Format Table
+        $definitions = Get-SPUsageDefinition
+        $finding.InputObject = $definitions | Select-Object Name, Status, Enabled, EnableReceivers, Retention, DaysToKeepData, DaysToKeepUsageFiles, UsageDatabaseEnabled, TableName, MaxTotalSizeInBytes, Hidden, Description
+    
+        foreach($definition in $definitions)
+        {
+          
+            # Does this definition usually use receivers? 
+            if($script:UsageDefinitionsWithReceivers.Contains($definition.Name))
+            {
+                $tempName = $definition.Name
+                $definitionFinding = New-SPDiagnosticFinding -Name $tempName -Severity Default -Format List -InputObject $definition
+
+                if(!$definition.EnableReceivers)
+                {
+                    $definitionFinding.Severity = [SPDiagnostics.Severity]::Warning
+                    $definitionFinding.Warning += "$tempName SPUsageReceiverDefinition 'EnableReceivers' is false. This will prevent usage collection for this type."
+                }
+                
+                if($definition.Receivers.Count -eq 0)
+                {
+                    $definitionFinding.Severity = [SPDiagnostics.Severity]::Warning
+                    $definitionFinding.Warning += "$tempName SPUsageReceiverDefinition is missing its EventReceiver. This may be the case if EnableReceivers is false."
+                }
+    
+                foreach($receiver in $definition.Receivers)
+                {
+                    $receiverFinding = New-SPDiagnosticFinding -Name $receiver -Severity Default -Format Table -InputObject $definition
+                    $assembly = $receiver.ReceiverAssembly
+                    
+                    if($null -ne $assembly)
+                    {
+                        $assemblyProperty = [PSCustomObject]@{
+                            ReceiverAssembly = $assembly
+                        }
+    
+                        $receiverFinding.InputObject = $assemblyProperty
+                        
+                        if($assembly.Contains("15.0.0.0") -and $Script:SPFarmBuild.Major -eq "16")
+                        {
+                            $receiverFinding.Severity = [SPDiagnostics.Severity]::Warning
+                            $receiverFinding.WarningMessage = "Assembly version is 15.0.0.0, and SP Version is 2016+. Ensure assembly is loading"
+                        }
+                    }
+    
+                    $definitionFinding.ChildFindings.Add($receiverFinding)
+                }
+                
+                $finding.ChildFindings.Add($definitionFinding)
+    
+            }
+   
+
+        }
+    
+        return $finding
+    }
+    
+    function Get-UsageAndHealthDataCollectionProxyDiagnosticFinding()
+    {
+        $finding = New-SPDiagnosticFinding -Name $script:UsageAndHealthDataCollectionProxyName -Severity Default -Format List
+        $finding.ReferenceLink += "https://learn.microsoft.com/en-us/sharepoint/administration/configure-usage-and-health-data-collection"
+    
+        $UHDCP = Get-SPServiceApplicationProxy | where-object {$_.TypeName -eq $script:UsageAndHealthDataCollectionProxyName}
+        if($null -ne $UHDCP)
+        {
+            $finding.InputObject = $UHDCP
+            if($UHDCP.Status -ne "Online")
+            {
+                $finding.Severity = [SPDiagnostics.Severity]::Warning
+                $finding.WarningMessage  = ($script:UsageAndHealthDataCollectionProxyName + " status is " + $UHDCP.Status)
+                if($UHDCP.Status -eq "Disabled")
+                {
+                    $finding.WarningMessage += "Status is Disabled. You may need to Provision the Usage and Health Data Collection Proxy"
+                    $finding.WarningMessage += '     $UsageAppProxy = Get-SPServiceApplicationProxy | Where {$_.TypeName -eq "Usage and Health Data Collection Proxy"}'
+                    $finding.WarningMessage += '     $UsageAppProxy.Provision()'
+                }
+            }
+        }
+        else {
+            $finding.Severity = [SPDiagnostics.Severity]::Warning
+            $finding.WarningMessage = ("There is no " + $script:UsageAndHealthDataCollectionProxyName + " Proxy.")
+        }
+    
+        return $finding
+    
+    }
+    
+    function Get-EventTypeDefinitionsDiagnosticFinding()
+    {
+        $finding = New-SPDiagnosticFinding -Name "EventType Definitions" -Severity Default -Format Table
+    
+        if($null -eq $script:ssa)
+        {
+            $finding.Severity = [SPDiagnostics.Severity]::Warning
+            $finding.WarningMessage = "There is no SSA, no EventTypes will be reported on"
+            return $finding
+        }
+    
+        $SSP = Get-SPEnterpriseSearchServiceApplicationProxy
+        $tenantConfig = $SSP.GetAnalyticsTenantConfiguration([Guid]::Empty)
+        $events = $tenantConfig.EventTypeDefinitions
+        $finding.InputObject = $events | select-object EventName, EventTypeId, TailTrimming, LifeTimeManagedPropertyName, RecentManagedPropertyName, RecommendationWeight, RelevanceWeight, RecentPopularityTimeframe, AggregationType, Rollups, Options,IsReadOnly, ApplicationName
+
+        foreach($event in $events)
+        {
+            if($event.Enabled -eq $false)
+            {
+                $name = $event.EventName
+                $eventFinding = New-SPDiagnosticFinding -Name $name -Severity Default -Format List -InputObject $event
+                $eventFinding.Severity = [SPDiagnostics.Severity]::Informational
+                $eventFinding.WarningMessage = "$name is not enabled, this will impact reports relying on $name data. This can be safely ignored for some event types"
+                $finding.ChildFindings.Add($eventFinding)
+            }
+
+        }
+        return $finding
+    }
+    
+    Function Get-EventStoreFolderInfoDiagnosticFinding($ssa)
+    {
+        $finding = New-SPDiagnosticFinding -Name "Event Store Folder" -Severity Default
+    
+        if($null -eq $ssa)
+        {
+            $finding.Severity = [SPDiagnostics.Severity]::Warning
+            $finding.WarningMessage+= "There is no SSA, No Eventstore Files to be found"
+            return $finding
+        }
+    
+        $apcServers = Get-AnalyticsProcessingComponentServers $ssa
+        $IsAPCServer = $false
+        foreach($apcServer in $apcServers)
+        {
+            if($apcServer.Name -ilike $env:COMPUTERNAME)
+            {
+                $IsAPCServer = $true
+            }
+        }
+    
+        if(!$IsAPCServer)
+        {
+            $finding.Severity = [SPDiagnostics.Severity]::Informational
+            $finding.WarningMessage += "This is not an Analytics Processing Component Server. Skipping EventFolder check. Recommend running script on an APC as well."
+            return $finding
+        }
+    
+        $name = "Event Store Folder Info"
+        $path = GetEventStorePath
+    
+        $finding.ChildFindings.Add((Get-FolderInfoDiagnosticFinding $name $path))
+      
+        return $finding
+    }
+    
+    function GetEventStorePath {
+    
+        $buildVersion = [string]$Script:SPFarmBuild.Major + "." + [string]$Script:SPFarmBuild.Minor
+        $datapath = (Get-Item "HKLM:\Software\Microsoft\Office Server\$buildVersion\Search\Setup").GetValue("DataDirectory")
+    
+        $eventshare = Join-Path $datapath "Analytics_$($script:ssa.ApplicationName)"
+        $eventstore = Join-Path $eventshare "EventStore"
+        return $eventstore
+        
+    }
+    
+    Function Get-FolderInfoDiagnosticFinding($findingName, $path)
+    {
+        $finding = New-SPDiagnosticFinding -Name $findingName -Severity Default -Format List 
+    
+        $properties = [PSCustomObject]@{
+            Path = $path
+        }
+        
+        $finding.InputObject = $properties
+    
+        if(![System.IO.Directory]::Exists($path))
+        {
+            $finding.Format = [SPDiagnostics.Format]::Table
+            $finding.WarningMessage += "$path does not exist"
+            $finding.Severity = [SPDiagnostics.Severity]::Warning
+            return $finding
+        }
+    
+        $folderacls = Get-PermissionsForObject $path
+    
+        if($null -ne $folderacls)
+        {
+            $permissionFinding = New-SPDiagnosticFinding -Name "Permissions for $path" -Severity Default -Format Table 
+           
+            if($Script:CheckServiceACLs)
+            {
+                if(![String]::IsNullOrEmpty($Script:TimerServiceAccount))
+                {
+                    $permissionFinding.ChildFindings.Add((CheckAccountMembership $folderacls $Script:TimerServiceAccount "Timer Service"))
+                }
+                if(![String]::IsNullOrEmpty($Script:W3WPAppPoolAccount))
+                {
+                    $permissionFinding.ChildFindings.Add((CheckAccountMembership $folderacls $script:W3WPAppPoolAccount "W3WP App Pool"))
+                }
+            }
+            
+            #$permissionFinding.InputObject = $ACLS 
+            $permissionFinding.InputObject = $folderacls.access | Select-Object IdentityReference, FileSystemRights, AccessControlType, IsInherited, InheritanceFlags, PropagationFlags
+    
+            $finding.ChildFindings.Add($permissionFinding)
+            
+        }
+    
+        $items = get-childitem -Path $path -ErrorAction SilentlyContinue -Recurse | Select-Object Name, CreationTime, LastAccessTime,LastWriteTime,Attributes | Sort-Object LastWriteTime -Descending
+    
+        if($null -ne $items)
+        {
+            $EventStoreContentFinding =  New-SPDiagnosticFinding -Name "$findingName Contents" -Severity Default -Format Table -InputObject $items 
+            $finding.ChildFindings.Add($EventStoreContentFinding)
+        }
+        else {
+            $finding.Severity = [SPDiagnostics.Severity]::Warning
+            $finding.WarningMessage = "There are no Items in: $path"
+        }
+         
+        return $finding
+    }
+    
+    function Get-PermissionsForObject ($folder) 
+    {
+        if($NoPermCheck -eq $true) {return}
+    
+        $folderacls = get-acl $folder -ErrorAction SilentlyContinue
+        return $folderacls      
+    }
+    function CheckAccountMembership($acls, $account, $context)
+    {
+        $collection = @()
+    
+        foreach($acl in $acls.Access)
+        {
+            $identityReference = $acl.IdentityReference
+    
+            # Does this group begin with the COMPUTERNAME
+            $identityReference = $identityReference.ToString().ToLower()
+            if($identityReference.StartsWith($env:COMPUTERNAME.ToLower()))
+            {
+                # Remove Computername from group name for call to Get-LocalGroupMember
+                $identityReference = $identityReference.Substring($env:COMPUTERNAME.Length+1)
+    
+                $localGroupMembers = Get-LocalGroupMember $identityReference
+    
+                $retObj = $null
+                # Identify whether the member is a member of each local group
+                foreach($member in $localGroupMembers)
+                {
+                    # Once you've found the member, you can break from the foreach loop to save time
+                    if($member.Name.ToLower() -like $Script:TimerServiceAccount.ToLower())
+                    {
+                        $retObj = [PSCustomObject]@{
+                            Sevice = $context
+                            Account =  $Script:TimerServiceAccount
+                            "Member Of" = $identityReference
+                        }
+                        break
+                    }
+                }
+    
+                if($null -ne $retObj)
+                {
+                    $collection += $retObj
+                }
+            } 
+        }
+    
+        if($collection.Length -gt 0)
+        {
+            $finding = New-SPDiagnosticFinding -Name "Account Membership" -Severity Default -Format Table -InputObject $collection
+            return $finding
+        }
+    
+    }
+    
+    Function Get-RequestUsageFolderInfoDiagnosticFinding()
+    {
+        $name = "RequestsUsage Folder Info"
+        $path = $Script:UsageLogDir + "RequestUsage\" 
+        $finding = Get-FolderInfoDiagnosticFinding $name $path
+    
+        $FullFilePath = $path + $script:ImportProgressFile
+    
+        $importProgressItem = Get-Item -Path $FullFilePath -ErrorAction SilentlyContinue
+        
+        if($null -ne $finding)
+        {
+            if($null -ne $importProgressItem)    {
+                    $ImportProgressContent = Get-Content $importProgressItem
+                    $temp = $finding.InputObject
+                    $temp | Add-Member -MemberType NoteProperty -Name $script:ImportProgressFile -Value "$ImportProgressContent"
+                    $finding.InputObject = $temp
+            }
+            else {
+                $finding.Severity = [SPDiagnostics.Severity]::Warning
+                $finding.WarningMessage += $script:ImportProgressFile + " Not Found, ensure that job-usage-log-file-import is running"
+            }
+        }
+    
+    
+        return $finding
+    }
+    
+    function Get-UsageAnalyticsInfoDiagnosticFinding
+    {
+        $finding = New-SPDiagnosticFinding -Name "Usage Analytics Timerjob Information" -Severity Default -Format List 
+    
+        if($null -eq $script:ssa)
+        {
+            $finding.WarningMessage = "No SSA Present, There will be no Usage Analytics Timer Job"
+            $finding.Severity = [SPDiagnostics.Severity]::Warning
+            return $finding
+        }
+        
+        $usageAnalyticsJobName = "Usage Analytics Timer Job for Search Application " + $script:ssa.Id
+        $usageJob = Get-SPTimerJob | Where-Object{$_.Name -eq $usageAnalyticsJobName}
+    
+        if($usageJob)
+        {
+            $finding.InputObject = $usageJob
+            $AnalysisInfoFinding = New-SPDiagnosticFinding -Name "Analysis Information from TimerJob" -Severity Default -Format List -InputObject $usageJob.GetAnalysisInfo()
+            $finding.ChildFindings.Add($AnalysisInfoFinding)
+        }
+        else
+        {
+            $finding.Severity = [SPDiagnostics.Severity]::Warning
+            $finding.WarningMessage += ("The Usage Analytics Timer Jobs is missing for this SSA: " + $script:ssa.Name)
+        }
+    
+        return $finding
+    }
+    
+    function Get-SearchAnalysisEngineInformationDiagnosticFinding
+    {
+        $finding = New-SPDiagnosticFinding -Name "AnalyticsJobDefinition Jobs" -Severity Default -Format List 
+    
+        if($null -eq $script:ssa)
+        {
+            $finding.WarningMessage = "No SSA Present, There will be no Usage Analytics Timer Job"
+            $finding.Severity = [SPDiagnostics.Severity]::Warning
+            return $finding
+        }
+    
+    
+        $jobs = get-sptimerjob | Where-Object{$_.TypeName -like "Microsoft.Office.Server.Search.Analytics.AnalyticsJobDefinition"}
+    
+        if($null -eq $jobs) 
+        {
+            $finding.WarningMessage = "Microsoft.Office.Server.Search.Analytics.AnalyticsJobDefinition TimerJob not found"
+            $finding.Severity = [SPDiagnostics.Severity]::Warning
+            return $finding
+        }
+    
+        foreach($job in $jobs)
+        {
+            $jobFinding =  New-SPDiagnosticFinding -Name $job.Name -Severity Default -Format List -InputObject $job
+    
+            $analysisjobs = $job.Analyses 
+    
+            foreach($analysisjob in $analysisjobs)
+            {
+                $analysisJobFinding = New-SPDiagnosticFinding -Name $analysisjob.Name -Severity Default -Format List -InputObject $analysisjob
+    
+                $analysisInfo = $analysisjob.GetAnalysisInfo()
+                if($analysisInfo)
+                {
+                    $AnalysisInfoFinding = New-SPDiagnosticFinding -Name "Analysis Info" -Severity Default -Format List -InputObject $analysisInfo
+                    $analysisJobFinding.ChildFindings.Add($AnalysisInfoFinding)
+                }
+                else {
+                    $analysisJobFinding.Severity = [SPDiagnostics.Severity]::Informational
+                    $analysisJobFinding.WarningMessage += "No Analysis Info found"
+                }
+
+                $analysisConfiguration = $analysisjob.GetAnalysisConfiguration()
+                if($analysisConfiguration)
+                {
+                    $AnalysisConfigurationFinding =  New-SPDiagnosticFinding -Name "Analysis Configuration" -Severity Default -Format Table -InputObject $analysisConfiguration
+                    $analysisJobFinding.ChildFindings.Add($AnalysisConfigurationFinding)
+    
+                }else {
+                    $analysisJobFinding.Severity = [SPDiagnostics.Severity]::Informational
+                    $analysisJobFinding.WarningMessage += "No Analysis Configuration found"
+                }
+    
+                # checking and calling out LastRunCompletedTime
+    
+                $LastRunCompletedTime = $info.LastRunCompletedTime
+                if($null -ne $LastRunCompletedTime)
+                {
+                    $timespan = (Get-Date) - $LastRunCompletedTime
+                    if($timespan.Days -gt 3)
+                    {
+                        $analysisJobFinding.Severity = [SPDiagnostics.Severity]::Warning
+                        $analysisJobFinding.Warning += " It's been more than 3 days since the AnalyticsJobDefinition LastRunCompletedTime was successful"
+                    }
+                }
+                $jobFinding.ChildFindings.Add($analysisJobFinding)
+            }
+    
+            $finding.ChildFindings.Add($jobFinding)
+        }
+        
+        return $finding
+    }
+    
+    function Get-AnalyticsProcessingComponentServers($ssa)
+    {
+        $ActiveTopology = $ssa.ActiveTopology
+        $components = $ActiveTopology.GetComponents() 
+        $AnalyticsProcessComponents = @{}
+        foreach($component in $components)
+        {
+            if($component.GetType -like 'AnalyticsProcessingComponent')
+            {
+                $AnalyticsProcessComponents += $component
+            }
+        }
+        return $AnalyticsProcessComponents
+    }
+
+   
+    $UsageAndReportFinding = New-SPDiagnosticFinding -Name "Usage Analysis and Reporting Findings" -InputObject $null -Format Table
+  
+    #$UsageAndReportFinding.ChildFindings.Add((Get-SPDiagnosticFarmFindings))
+    $UsageAndReportFinding.ChildFindings.Add((Get-SPAnalyticsTopologyDiagnosticFinding $script:ssa))
+    $UsageAndReportFinding.ChildFindings.Add((Get-SPDiagnosticSitePropertiesOfInterest $site))
+    $UsageAndReportFinding.ChildFindings.Add((Get-SPDiagnosticOWSTimerService))
+    $UsageAndReportFinding.ChildFindings.Add((Get-SPDiagnosticFindingSPUsageManager))
+    $UsageAndReportFinding.ChildFindings.Add((Get-SPUsageServiceDiagnosticFinding))
+    $UsageAndReportFinding.ChildFindings.Add((Get-SPUsageDefinitionDiagnosticFinding))
+    $UsageAndReportFinding.ChildFindings.Add((Get-UsageAndHealthDataCollectionProxyDiagnosticFinding))
+    $UsageAndReportFinding.ChildFindings.Add((Get-EventTypeDefinitionsDiagnosticFinding))
+    $UsageAndReportFinding.ChildFindings.Add((Get-EventStoreFolderInfoDiagnosticFinding $script:ssa))
+    $UsageAndReportFinding.ChildFindings.Add((Get-RequestUsageFolderInfoDiagnosticFinding))
+    $UsageAndReportFinding.ChildFindings.Add((Get-UsageAnalyticsInfoDiagnosticFinding))
+    $UsageAndReportFinding.ChildFindings.Add((Get-SearchAnalysisEngineInformationDiagnosticFinding))
+
+    return $UsageAndReportFinding
+}
 
 
 #endregion
 
+
+#region TLS
+<#
+    Required actions per version:
+        2019
+            - N/A 1.2 is used by default
+
+        2016
+            - ODBC driver 11 must be installed
+                https://docs.microsoft.com/en-us/sharepoint/security-for-sharepoint-server/enable-tls-1-1-and-tls-1-2-support-in-sharepoint-server-2016#ODBC1.1
+            - SQL 2012 Native Clinet for 1.2 support
+                https://docs.microsoft.com/en-us/sharepoint/security-for-sharepoint-server/enable-tls-1-1-and-tls-1-2-support-in-sharepoint-server-2016#sql2012
+
+        2013
+            - Enable TLS 1.1/1.2 in Schannel
+            - Enable TLS 1.1/1.2 in WinHTTP
+            - Enable TLS 1.1/1.2 in Internet Explorer
+            - Install SQL Server 2008 R2 Native CLient w/TLS 1.2 support
+
+        2010
+            - Enable TLS 1.1/1.2 in Schannel
+            - Enable TLS 1.1/1.2 in WinHTTP
+            - Enable TLS 1.1/1.2 in Internet Explorer
+            - Install SQL Server 2008 R2 Native CLient w/TLS 1.2 support
+            - Install ADO.NET 2.0 SP2 upate
+            - Install .Net framework update
+
+        Optional (applies to all versions):
+            - Enable strong cryptography in .Net 3.5
+            - Disable earlier versions of TLS in Schannel
+#>
+
+
+function Get-RegistryValue
+{
+    [cmdletbinding()]
+    Param
+    (
+        [Parameter()]
+        [string]
+        $ServerName,
+
+        [Parameter()]
+        [Microsoft.Win32.RegistryHive]
+        $RegistryHive = [Microsoft.Win32.RegistryHive]::LocalMachine,
+
+        [Parameter()]
+        [String]
+        $Key,
+
+        [Parameter()]
+        [string]
+        $Property
+    )
+
+    if([string]::Equals($ServerName, [Microsoft.SharePoint.Administration.SPServer]::Local.Name, [system.StringComparison]::InvariantCultureIgnoreCase))
+    {
+        switch ($RegistryHive)
+        {
+            ClassesRoot {$root = "HKCR"}
+            CurrentConfig {$root = "HKCC"}
+            CurrentUser {$root = "HKCU"}
+            LocalMachine {$root = "HKLM"}
+            PerformanceData {$root = "HKPD"}
+            Users   {$root = "HKU"}
+            default {$root = "HKLM"}
+        }
+
+        $regPath = "{0}:\{1}" -f $root, $Key
+
+        $itemProp = Get-ItemProperty -Path $regPath -Name $Property -ErrorAction SilentlyContinue
+        return $itemProp.$Property
+        
+
+
+    }
+    else
+    {
+        $keyPath = $Key.Replace("\", "\\")
+        $reg = [Microsoft.Win32.RegistryKey]::OpenRemoteBaseKey($RegistryHive, $ServerName)
+        $regKey = $reg.OpenSubKey($keyPath)
+        if($null -eq $regKey)
+        {
+            return $null
+        }
+
+        $value = $regKey.GetValue($Property)
+        return $value
+    }
+}
+
+function checkFriendlyName ([string]$checkName)
+{
+    switch ($checkName)
+    {
+        oldTlsVersionsDisabled          {return "Disable earlier versions of TLS in Windows Schannel"}
+        tlsEnabledInSchannel            {return "Enable TLS 1.1 and 1.2 support in Windows Schannel"}
+        tlsEnabledInWinHTTP             {return "Enable TLS 1.1 and 1.2 support in WinHTTP"}
+        sql2008R2NativeClientUpdated    {return "Install SQL Server 2008R2 Native Client update for TLS 1.2 support"}
+        sql2012NativeClientUpdated      {return "Install SQL Server 2012 Native Client update for TLS 1.2 support"}
+        adoNetUpdated                   {return "Install ADO.NET 2.0 SP2 update for TLS 1.1 and TLS 1.2 support"}
+        strongCyptographyEnabled4       {return "Enable strong cryptography in .NET Framework 4.6 or higher"}
+        strongCyptographyEnabled2       {return "Enable strong cryptography in .NET Framework 3.5"}
+        netDefaultTlsVersion            {return "Install .Net Framework 3.5 update for TLS 1.1 and TLS 1.2 support"}
+        odbc11Updated                   {return "Install OBDC Driver 11 for SQL Server update for TLS 1.2 support"}
+        net46orHigherInstalled          {return "Install .Net Framework 4.6 or higher"}
+    }
+    
+}
+
+function oldTlsVersionsDisabled ($ServerName)
+{
+    if
+    (
+        (Get-RegistryValue -ServerName $ServerName -Key "SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.0\Client" -Property "DisabledByDefault") -eq 1 -and
+        (Get-RegistryValue -ServerName $ServerName -Key "SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.0\Server" -Property "DisabledByDefault") -eq 1 -and
+        (Get-RegistryValue -ServerName $ServerName -Key "SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.1\Client" -Property "DisabledByDefault") -eq 1 -and
+        (Get-RegistryValue -ServerName $ServerName -Key "SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\TLS 1.1\Server" -Property "DisabledByDefault") -eq 1
+    )
+    {
+        return $true
+    }
+    
+    return $false
+}
+
+
+function tlsEnabledInSchannel ($ServerName)
+{
+    if
+    (
+        (Get-RegistryValue -ServerName $ServerName -Key "SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\Client\TLS 1.2" -Property "DisabledByDefault") -eq 0 -and
+        (Get-RegistryValue -ServerName $ServerName -Key "SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\Client\TLS 1.2" -Property "Enabled") -eq 1 -and
+        (Get-RegistryValue -ServerName $ServerName -Key "SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\Server\TLS 1.2" -Property "DisabledByDefault") -eq 0 -and
+        (Get-RegistryValue -ServerName $ServerName -Key "SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\Server\TLS 1.2" -Property "Enabled") -eq 1
+    )
+    {
+        #it's explicitly enabled, return true
+        return $true
+    }
+    elseif 
+    (
+        $null -eq (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\Server\TLS 1.2" -EA 0) -or
+        (
+            $null -eq (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\Server\TLS 1.2\Client" -EA 0) -and
+            $null -eq (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\SCHANNEL\Protocols\Server\TLS 1.2\Server" -EA 0)
+        )
+    ) 
+    {
+        return $true
+    }
+
+    return $false
+}
+
+
+function tlsEnabledInWinHTTP ($ServerName)
+{
+    $64value = Get-RegistryValue -ServerName $ServerName -Key "SOFTWARE\Microsoft\Windows\CurrentVersion\Internet Settings\WinHttp" -Property "DefaultSecureProtocols"
+    $32value = Get-RegistryValue -ServerName $ServerName -Key "SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Internet Settings\WinHttp" -Property "DefaultSecureProtocols"
+
+    if
+    (
+        $64value -band 2048 -gt 0 -and
+        $32value -band 2048 -gt 0
+    )
+    {
+        return $true
+    }
+
+    return $false
+}
+
+
+function sql2008R2NativeClientUpdated ($ServerName)
+{
+    $products = Get-ChildItem -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+    foreach ($product in $products)
+    {
+        try 
+        {
+            if($product.GetValue("DisplayName").Contains("Microsoft SQL Server 2008 R2 Native Client"))
+            {
+                $locatedVersion = New-Object "System.Version" -ArgumentList @($product.GetValue("DisplayVersion"))
+                break
+            }
+        }
+        catch {}
+    }
+    
+    if($locatedVersion.Build -ge 6560)
+    {
+        return $true
+    }
+
+    return $false
+}
+
+
+function adoNetUpdated
+{
+    #later... maybe...
+}
+
+
+function strongCyptographyEnabled4 ($ServerName)
+{
+    if
+    (
+        (Get-RegistryValue -ServerName $ServerName -Key "SOFTWARE\Microsoft\.NETFramework\v4.0.30319" -Property "SchUseStrongCrypto") -eq 1 -and
+        (Get-RegistryValue -ServerName $ServerName -Key "SOFTWARE\Wow6432Node\Microsoft\.NETFramework\v4.0.30319" -Property "SchUseStrongCrypto") -eq 1
+    )
+    {
+        return $true
+    }
+    
+    return $false
+}
+
+function strongCyptographyEnabled2 ($ServerName)
+{
+    if
+    (
+        (Get-RegistryValue -ServerName $ServerName -Key "SOFTWARE\Microsoft\.NETFramework\v2.0.50727" -Property "SchUseStrongCrypto") -eq 1 -and
+        (Get-RegistryValue -ServerName $ServerName -Key "SOFTWARE\Wow6432Node\Microsoft\.NETFramework\v2.0.50727" -Property "SchUseStrongCrypto") -eq 1
+    )
+    {
+        return $true
+    }
+    
+    return $false
+}
+
+
+function netDefaultTlsVersion ($ServerName)
+{
+    if
+    (
+        (Get-RegistryValue -ServerName $ServerName -Key "HKLM:\SOFTWARE\Microsoft\.NETFramework\v2.0.50727" -Property "SystemDefaultTlsVersions") -eq 1 -and
+        (Get-RegistryValue -ServerName $ServerName -Key "HKLM:\SOFTWARE\Wow6432Node\Microsoft\.NETFramework\v2.0.50727" -Property "SystemDefaultTlsVersions") -eq 1
+    )
+    {
+        return $true
+    }
+
+    return $false
+}
+
+
+function odbc11Updated ($ServerName)
+{
+    $products = Get-ChildItem -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+    foreach ($product in $products)
+    {
+        try 
+        {
+            if($product.GetValue("DisplayName").Contains("Microsoft ODBC Driver 11 for SQL Server"))
+            {
+                $locatedVersion = New-Object "System.Version" -ArgumentList @($product.GetValue("DisplayVersion"))
+                break
+            }
+        }
+        catch {}
+    }
+    
+    if($locatedVersion.Build -ge 5543)
+    {
+        return $true
+    }
+
+    return $false
+}
+
+
+function sql2012NativeClientUpdated
+{
+    $products = Get-ChildItem -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+    foreach ($product in $products)
+    {
+        try 
+        {
+            if($product.GetValue("DisplayName").Contains("Microsoft SQL Server 2012 Native Client"))
+            {
+                $locatedVersion = New-Object "System.Version" -ArgumentList @($product.GetValue("DisplayVersion"))
+                break
+            }
+        }
+        catch {}
+    }
+    
+    if($locatedVersion.Build -ge 7001)
+    {
+        return $true
+    }
+
+    return $false
+}
+
+
+function net46orHigherInstalled ($ServerName)
+{
+    if
+    (
+        Get-RegistryValue -ServerName $ServerName -Key "SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full" -Property "Release" -ge 393295
+    )
+    {
+        return $true
+    }
+
+    return $false
+}
+
+
+function getWindowsVersion ($ServerName)
+{
+    $v = [version](Get-WmiObject Win32_OperatingSystem -ComputerName $ServerName -ErrorAction Stop).Version
+    switch ($v.Major) {
+        6
+        {
+            if($v.Minor -eq 1)
+            {
+                return "2008R2"
+            }
+            elseif($v.Minor -eq 2)
+            {
+                return "2012"
+            }
+            elseif($v.Minor -eq 3)
+            {
+                return "2012R2"
+            }
+        }
+        10
+        {
+            return "2016+"
+        }
+        Default {}
+    }
+}
+
+#AzureFrontDoorCiphersEnabled joeric-2019-wfe
+function AzureFrontDoorCiphersEnabled ($ServerName)
+{
+    $afdCiphers = @(
+        "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+        "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+        "TLS_DHE_RSA_WITH_AES_256_GCM_SHA384",
+        "TLS_DHE_RSA_WITH_AES_128_GCM_SHA256"
+    )
+    $supportedCiphers = New-Object System.Collections.ArrayList
+    $priorityThreshold = 10
+    $priorityWarning = $false
+
+    $regLocations = @(
+        "SYSTEM\CurrentControlSet\Control\Cryptography\Configuration\Local\SSL"
+        "SOFTWARE\Policies\Microsoft\Cryptography\Configuration\SSL"
+    )
+
+    $registryHive  = [Microsoft.Win32.RegistryHive]::LocalMachine
+    $reg = [Microsoft.Win32.RegistryKey]::OpenRemoteBaseKey($registryHive, $ServerName)
+    foreach ($regLocation in $regLocations)
+    {
+        $keyPath = $regLocation.Replace("\", "\\")
+        $key = $reg.OpenSubKey($keyPath)
+        foreach ($subKeyName in $key.GetSubKeyNames())
+        {
+            if($subKeyName.EndsWith("00010002"))
+            {
+                $subKey = $key.OpenSubKey($subKeyName)
+                $cipherString = $subKey.GetValue("Functions")
+                if(![String]::IsNullOrEmpty($cipherString))
+                {
+                    $ciphers = $cipherString.Split(",")
+                    foreach($afdCipher in $afdCiphers)
+                    {
+                        if($ciphers.Contains($afdCipher) -and !$supportedCiphers.Contains($afdCipher))
+                        {
+                            $supportedCiphers+=[PSCustomObject]@{
+                                SupportedCipher = $afdCipher.ToString()
+                            }
+                            $idx = $ciphers.IndexOf($afdCipher)
+                            if($idx -gt $priorityThreshold-1)
+                            {
+                                $priorityWarning = $true
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    $afdFinding = New-SPDiagnosticFinding `
+        -Name ("Azure Front Door Compatible Ciphers: {0}" -f $ServerName) `
+        -Description "Azure Front Door (AFD) serves as a gateway for much of M365, as such most hybrid scenarios require the ability to establish a secure connection to AFD." `
+        -ReferenceLink "https://learn.microsoft.com/en-us/azure/frontdoor/front-door-faq#what-are-the-current-cipher-suites-supported-by-azure-front-door-"
+
+    if($supportedCiphers.Count -le 0)
+    {
+        $afdFinding.Severity = [SPDiagnostics.Severity]::Warning
+        $afdFinding.WarningMessage += "No supported ciphers found to communicate with AFD, if you are currently or intending to use hybrid functionality this should be addressed."
+    }
+    else
+    {
+        $afdFinding.InputObject = $supportedCiphers
+        $afdFinding.Format = [SPDiagnostics.Format]::Table
+
+        if($priorityWarning)
+        {
+            #Write-Warning "Priority of Azure Front Door compatible ciphers may be too low"
+            $afdFinding.WarningMessage+="Priority of Azure Front Door compatible ciphers may be too low, if you are encountering issues with hybrid functionality this should be investigated."
+            $afdFinding.Severity = [SPDiagnostics.Severity]::Warning
+            $afdFinding.ReferenceLink += "https://learn.microsoft.com/en-us/sharepoint/troubleshoot/administration/authentication-errors-tls12-support"
+        }
+    }
+
+    if((Get-WmiObject Win32_OperatingSystem -ErrorAction Stop).Version.StartsWith("6."))
+    {
+        $afdFinding.WarningMessage+="Pre windows 2016 detected, even with proper ciphers enabled there may still be intermittent issues, please refer to reference articles for more information."
+        $afdFinding.Severity = [SPDiagnostics.Severity]::Warning
+        $afdFinding.WarningMessage += "https://docs.microsoft.com/en-us/troubleshoot/windows-server/identity/apps-forcibly-closed-tls-connection-errors"
+    }
+
+    return $afdFinding
+}
+
+function Get-SPDiagnosticsTlsFinding
+{
+    $finding = New-SPDiagnosticFinding `
+        -Name "TLS Configuration" `
+        -InputObject $null `
+        -Description "These findings are specific to enabling and providing support for TLS 1.2 connections, this is necessary in environments where TLS 1.0/1.1 has been disabled or when enabling hybrid or other functionality that requires connectivity to TLS 1.2 secured resources. Please refer to the reference material for more information."
+
+    $spVersion = getSPVersion
+    switch ($spVersion) {
+        2013
+        {
+            $finding.ReferenceLink = "https://docs.microsoft.com/en-us/SharePoint/security-for-sharepoint-server/enable-tls-and-ssl-support-in-sharepoint-2013"
+        }
+        2016
+        {
+            $finding.ReferenceLink = "https://docs.microsoft.com/en-us/sharepoint/security-for-sharepoint-server/enable-tls-1-1-and-tls-1-2-support-in-sharepoint-server-2016"
+        }
+        2019
+        {
+            $finding.Description += "SharePoint Server 2019 natively support TLS1.2, there are no configurations necessary."
+            $finding.ReferenceLink = "https://docs.microsoft.com/en-us/sharepoint/security-for-sharepoint-server/enable-tls-1-1-and-tls-1-2-support-in-sharepoint-server-2019"
+        }
+        SPSE
+        {
+            $finding.Description += "SharePoint Server Subscription Edition natively support TLS1.2, there are no configurations necessary."
+            $finding.ReferenceLink = "https://docs.microsoft.com/en-us/sharepoint/security-for-sharepoint-server/enable-tls-1-1-and-tls-1-2-support-in-sharepoint-server-2019"
+        }
+        Default {}
+    }
+
+    $servers = Get-SPServer | Where-Object {$_.Role -ne [Microsoft.SharePoint.Administration.SPServerRole]::Invalid}
+    foreach($server in $servers)
+    {
+        try 
+        {
+            
+            $serverFinding = New-SPDiagnosticFinding `
+                -Name ("TLS Configurations: {0}" -f $server.Name) `
+                -InputObject $null
+            
+            $winVersion = getWindowsVersion -ServerName $server.Name
+            $checks = @()
+            switch ($spVersion) {
+                2010
+                {
+                    #Not investing in writing analyzers for 2010.
+                    return $null
+                }
+                2013
+                {
+                    switch ($winVersion)
+                    {
+                        2008R2
+                        {
+                            $checks+="tlsEnabledInSchannel,True"
+                            $checks+="tlsEnabledInWinHTTP,True"
+                        }
+                        2012
+                        {
+                            $checks+="tlsEnabledInWinHTTP,True"
+                        }
+                        2012R2
+                        {
+                            #
+                        }
+                        Default {}
+                    }
+                    $checks+="sql2008R2NativeClientUpdated,True"
+                    $checks+="net46orHigherInstalled,True"
+                    $checks+="strongCyptographyEnabled4,True"
+                    $checks+="strongCyptographyEnabled2,False"
+                    $checks+="oldTlsVersionsDisabled,False"
+                }
+                2016
+                {
+                    $checks+="odbc11Updated,True"
+                    $checks+="sql2012NativeClientUpdated,True"
+                    $checks+="strongCyptographyEnabled4,False"
+                    $checks+="strongCyptographyEnabled2,False"
+                    $checks+="oldTlsVersionsDisabled,False"
+                }
+                2019
+                {
+                    $checks+="oldTlsVersionsDisabled,False"
+                }
+                SPSE
+                {
+                    $checks+="oldTlsVersionsDisabled,False"
+                }
+                Default {}
+            }
+
+
+            $results = @()
+            foreach($check in $checks)
+            {
+                $results+=[PSCustomObject]@{
+                    Name = checkFriendlyName $check.Split(",")[0]
+                    Required = $check.Split(",")[1]
+                    Configured = (Invoke-Expression ("{0} -ServerName `"{1}`"" -f $check.Split(",")[0], $server.Name))
+                }
+            }
+
+            #AzureFrontDoorCiphersEnabled
+            $afdFinding = AzureFrontDoorCiphersEnabled -ServerName $server.Name
+            
+            if(!!($results | Where-Object{![bool]::Parse($_.Configured) -and [bool]::Parse($_.Required)}))
+            {
+                $serverFinding.WarningMessage += "Required configurations for TLS 1.2 support have not been made, this is necessary in environments where TLS 1.0/1.1 has been disabled or when enabling hybrid or other functionality that requires connectivity to TLS 1.2 secured resources."
+            }
+
+            $serverFinding.InputObject = $results
+            $serverFinding.Format = "Table"
+            $serverFinding.ChildFindings.Add($afdFinding)      
+        }
+        catch
+        {
+            $serverFinding.WarningMessage += "Could not generate finding for this server"
+        }
+        finally
+        {
+            $finding.ChildFindings.Add($serverFinding)
+        }
+        
+    }
+    return $finding
+}
+#endregion
 
 
 # Main function that calls into building the report and contains the first level findings.
@@ -3439,6 +4859,31 @@ function main
         }
     }
 
+    $site = $null
+
+    if([string]::IsNullOrEmpty($siteUrl) -and $UsageAndReporting)
+    {
+        $siteUrl = Read-Host "Please provide a site url [Default:http://sharepoint]"
+        if([String]::IsNullOrEmpty($siteUrl))
+        {
+            $siteUrl = "http://sharepoint"
+        }
+        
+        $site = get-spsite $siteUrl
+    
+        if($null -eq $site)
+        {
+            Write-Host "Site $siteUrl Not Found" -ForegroundColor Red
+            return;
+        }
+
+    }
+
+    if($UsageAndReporting -and $site)
+    {
+        Select-SPDiagnosticSSA
+    }
+
     $build = GetSPVersion $buildPrefix
     $rootFindingCollection = New-Object SPDiagnostics.FindingCollection[SPDiagnostics.Finding]
     $rootFindingCollection.Add((Get-SPDiagnosticsSupportDateFinding))
@@ -3446,6 +4891,15 @@ function main
     $rootFindingCollection.Add((Get-SPDiagnosticAuthFindings))
     $rootFindingCollection.Add((Get-SPDiagnosticSearchFindings))
     
+    if($UsageAndReporting -and $site)
+    {
+        $rootFindingCollection.Add((Get-SPDiagnosticUsageAndReportingInformation $site))
+    }
+
+    if($TLS)
+    {
+        $rootFindingCollection.Add((Get-SPDiagnosticsTlsFinding))
+    }
 
     $htmlContent = Write-DiagnosticReport -Findings $rootFindingCollection
 
