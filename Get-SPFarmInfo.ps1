@@ -430,6 +430,7 @@ function Write-DiagnosticReport
         .code {
             font-size: `$base-font-size * 0.875;
             font-family: 'consolas', 'monospace';
+            color: blue;
             padding: 0 1em;
         }
     </style>
@@ -1069,6 +1070,7 @@ function Get-SPDiagnosticTimerAndAdminServiceFinding
     {
         $timerFinding.Severity = [SPDiagnostics.Severity]::Critical
         $timerFinding.WarningMessage += "One or more Timer Service Instances is not online"
+        $timerFinding.Description+=("Example PowerShell to set the 'Timer Service Instance' object back online.<br/><div class=`"code`">`$farm = Get-SPFarm<br>`$obj = `$farm.GetObject('guid of disabled object')<br/>`$obj.Status = [Microsoft.SharePoint.Administration.SPObjectStatus]::Online<br/>`$obj.Update()</div>Once the above PowerShell is performed you Must restart the 'SharePoint Timer Service' service on that server (within services.msc console)<br/>")
         $timerFinding.ReferenceLink += "https://joshroark.com/sharepoint-all-about-one-time-timer-jobs/"
     }
 
@@ -1083,6 +1085,7 @@ function Get-SPDiagnosticTimerAndAdminServiceFinding
     {
         $adminFinding.Severity = [SPDiagnostics.Severity]::Critical
         $adminFinding.WarningMessage = "One or more Admin Service Instances is not online"
+        $adminFinding.Description+=("Example PowerShell to set the 'Admin Service Instance' object back online.<br/><div class=`"code`">`$farm = Get-SPFarm<br>`$obj = `$farm.GetObject('guid of disabled object')<br/>`$obj.Status = [Microsoft.SharePoint.Administration.SPObjectStatus]::Online<br/>`$obj.Update()</div>Once the above PowerShell is performed you Must restart the 'SharePoint Administration' service on that server (within services.msc console)<br/>")
         $adminFinding.ReferenceLink = "https://joshroark.com/sharepoint-all-about-one-time-timer-jobs/"
     }
 
