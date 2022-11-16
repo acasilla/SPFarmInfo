@@ -615,6 +615,9 @@ function Get-SPErrorFindings {
 function GetSPVersion($buildPrefix)
 {
     $farm = [Microsoft.SharePoint.Administration.SPFarm]::Local
+    $script:SPFarm = $farm
+    $Script:SPFarmBuild = $script:SPFarm.BuildVersion
+
     If($farm.BuildVersion.Major -eq 16 -or $farm.BuildVersion.Major -eq 15)
     {
         if($farm.BuildVersion.Major -eq 16)
@@ -667,27 +670,27 @@ function Get-SPDiagnosticsSupportDateFinding
     if($build -eq "SPSE")
     {
         $endOfSupportNotificationLink = "https://go.microsoft.com/fwlink/?LinkId=2198657" #"<a href=`"{0}`" target=`"_blank`">{0}</a>" -f "https://go.microsoft.com/fwlink/?LinkId=2198657"
-        $mainstreamSupportDate = [System.TimeZoneInfo]::ConvertTimeToUtc([System.DateTime]::new(2199, 12, 1), [System.TimeZoneInfo]::FindSystemTimeZoneById("Pacific Standard Time"));
-        $endOfSupportDate = [System.TimeZoneInfo]::ConvertTimeToUtc([System.DateTime]::new(2199, 12, 1), [System.TimeZoneInfo]::FindSystemTimeZoneById("Pacific Standard Time"));
+        $mainstreamSupportDate = [System.TimeZoneInfo]::ConvertTimeToUtc((New-Object DateTime 2199, 12, 1), [System.TimeZoneInfo]::FindSystemTimeZoneById("Pacific Standard Time"));
+        $endOfSupportDate = [System.TimeZoneInfo]::ConvertTimeToUtc((New-Object DateTime 2199, 12, 1), [System.TimeZoneInfo]::FindSystemTimeZoneById("Pacific Standard Time"));
         
     }
     elseif($build -eq "2019")
     {
         $endOfSupportNotificationLink = "https://go.microsoft.com/fwlink/?LinkId=2198656" #"<a href=`"{0}`" target=`"_blank`">{0}</a>" -f "https://go.microsoft.com/fwlink/?LinkId=2198656"
-        $mainstreamSupportDate = [System.TimeZoneInfo]::ConvertTimeToUtc([System.DateTime]::new(2024, 1, 9), [System.TimeZoneInfo]::FindSystemTimeZoneById("Pacific Standard Time"));
-        $endOfSupportDate = [System.TimeZoneInfo]::ConvertTimeToUtc([System.DateTime]::new(2026, 7, 14), [System.TimeZoneInfo]::FindSystemTimeZoneById("Pacific Standard Time"));
+        $mainstreamSupportDate = [System.TimeZoneInfo]::ConvertTimeToUtc((New-Object DateTime 2024, 1, 9), [System.TimeZoneInfo]::FindSystemTimeZoneById("Pacific Standard Time"));
+        $endOfSupportDate = [System.TimeZoneInfo]::ConvertTimeToUtc((New-Object DateTime 2026, 7,14), [System.TimeZoneInfo]::FindSystemTimeZoneById("Pacific Standard Time"));
     }
     elseIf($build -eq "2016")
     {
         $endOfSupportNotificationLink = "https://go.microsoft.com/fwlink/?LinkId=2198655" #"<a href=`"{0}`" target=`"_blank`">{0}</a>" -f "https://go.microsoft.com/fwlink/?LinkId=2198655"
-        $mainstreamSupportDate = [System.TimeZoneInfo]::ConvertTimeToUtc([System.DateTime]::new(2021, 7, 13), [System.TimeZoneInfo]::FindSystemTimeZoneById("Pacific Standard Time"));
-        $endOfSupportDate = [System.TimeZoneInfo]::ConvertTimeToUtc([System.DateTime]::new(2026, 7, 14), [System.TimeZoneInfo]::FindSystemTimeZoneById("Pacific Standard Time"));
+        $mainstreamSupportDate = [System.TimeZoneInfo]::ConvertTimeToUtc((New-Object DateTime 2021, 7, 13), [System.TimeZoneInfo]::FindSystemTimeZoneById("Pacific Standard Time"));
+        $endOfSupportDate = [System.TimeZoneInfo]::ConvertTimeToUtc((New-Object DateTime 2026, 7, 14), [System.TimeZoneInfo]::FindSystemTimeZoneById("Pacific Standard Time"));
     }
     elseif($build -eq "2013")
     {
         $endOfSupportNotificationLink = "https://go.microsoft.com/fwlink/?LinkId=2198654" #"<a href=`"{0}`" target=`"_blank`">{0}</a>" -f "https://go.microsoft.com/fwlink/?LinkId=2198654"
-        $mainstreamSupportDate = [System.TimeZoneInfo]::ConvertTimeToUtc([System.DateTime]::new(2018, 4, 10), [System.TimeZoneInfo]::FindSystemTimeZoneById("Pacific Standard Time"));
-        $endOfSupportDate = [System.TimeZoneInfo]::ConvertTimeToUtc([System.DateTime]::new(2023, 4, 11), [System.TimeZoneInfo]::FindSystemTimeZoneById("Pacific Standard Time"));
+        $mainstreamSupportDate = [System.TimeZoneInfo]::ConvertTimeToUtc((New-Object DateTime 2018, 4, 10), [System.TimeZoneInfo]::FindSystemTimeZoneById("Pacific Standard Time"));
+        $endOfSupportDate = [System.TimeZoneInfo]::ConvertTimeToUtc((New-Object DateTime 2023, 4, 11), [System.TimeZoneInfo]::FindSystemTimeZoneById("Pacific Standard Time"));
     }
     else
     {
@@ -720,12 +723,12 @@ function Get-SPDiagnosticsSupportDateFinding
         elseif([System.DateTime]::Compare($currentDate, $endOfSupportDate) -lt 0)
         {
             $endOfSupportSeverityLevel = "Warning";
-            $supportDateFinding.WarningMessage += "Your version of SharePoint is in no longer in 'Mainstream' support.</br> This means that Microsoft Support cannot file any requests for any 'bugs' or 'change requests' while in 'Extended' support.</br> Microsoft will only release 'Security' related updates in the patching cycle."
+            $supportDateFinding.Description += "This version of SharePoint Server is in 'Extended' Support.</br> Extended Support provides limited supportability. Microsoft does not accept requests for fixes, design changes, or new features during the Extended Support Phase.</br> Microsoft will only release 'Security' related updates in the patching cycle.</br>"
         }
         else
         {
             $endOfSupportSeverityLevel = "Alert";
-            $supportDateFinding.WarningMessage += "Support for your version of SharePoint has ended!</br> This means that Microsoft Support cannot provide any technical support.</br> Please Upgrade to a supported version of SharePoint"
+            $supportDateFinding.WarningMessage += "Support for this version of SharePoint Server has ended!</br> This means that Microsoft Support cannot provide any technical support.</br> Please Upgrade to a supported version of SharePoint"
         }   
     }
     else
@@ -740,12 +743,12 @@ function Get-SPDiagnosticsSupportDateFinding
             elseif([System.DateTime]::Compare($currentDate, $mainstreamSupportDate) -lt 0)
             {
                 $endOfSupportSeverityLevel = "Warning";
-                $supportDateFinding.WarningMessage += "Your version of SharePoint is in nearing the end of 'Mainstream' support.</br> This means that once we are in 'Extended Support', Microsoft Support cannot file any requests for any 'bugs' or 'change requests.'</br> Microsoft will only release 'Security' related updates in the patching cycle."
+                $supportDateFinding.Description += "This version of SharePoint Server is in nearing the end of 'Mainstream' support.</br>In 'Extended Support', Microsoft provides limited supportability. Microsoft does not accept requests for fixes, design changes, or new features during the 'Extended Support' Phase.</br> Microsoft will only release 'Security' related updates in the patching cycle.</br>"
             }
             else
             {
                 $endOfSupportSeverityLevel = "Alert";
-                $supportDateFinding.WarningMessage += "Your version of SharePoint is in no longer in 'Mainstream' support.</br> This means that Microsoft Support cannot file any requests for any 'bugs' or 'change requests' while in 'Extended' support.</br> Microsoft will only release 'Security' related updates in the patching cycle."
+                $supportDateFinding.Description += "This version of SharePoint Server is in 'Extended' Support.</br> Extended Support provides limited supportability. Microsoft does not accept requests for fixes, design changes, or new features during the Extended Support Phase.</br> Microsoft will only release 'Security' related updates in the patching cycle.</br>"
             }   
         }
     }
@@ -1501,7 +1504,7 @@ function  Get-SPDiagnosticsSPClaimProviderFinding
 function Get-SPDiagnosticSearchFindings
 {
 
-    $SSAs = Get-SPEnterpriseSearchServiceApplication  | Sort-Object Name
+    $SSAs = Get-SPEnterpriseSearchServiceApplication  | Sort-Object Name 
 
     $searchFindings = New-SPDiagnosticFinding -Name "Search Information" -Severity Default -InputObject $null
     if($null -eq $SSAs -or $SSAs.Count -eq 0)
@@ -3480,13 +3483,13 @@ function Get-SPDiagnosticsSearchHealthCheck()
 
 function Select-SPDiagnosticSSA
 {
-    $ssas = @(Get-SPEnterpriseSearchServiceApplication)
+    $ssas = @(Get-SPEnterpriseSearchServiceApplication | Sort-Object Name)
 
     if($ssas.Count -eq 1)
     {
         $script:ssa = $ssas[0]
     }
-    else
+    elseif($ssas.Count -gt 1)
     {
         $menu = @{}
         for($i=1;$i -le $ssas.count; $i++)
@@ -3504,7 +3507,6 @@ function Select-SPDiagnosticSSA
 function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
 {
     $Script:UsageLogDir = ""
-    $Script:SPFarmBuild = $null;
     $script:ImportProgressFile = "importprogress.ini"
     
     # Some things can only be done on certain version of Powershell and/or SharePoint. 
@@ -3563,13 +3565,23 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
         
     function Get-SPAnalyticsTopologyDiagnosticFinding($ssa)
     {
-        $AnalyticsTopology = $ssa.AnalyticsTopology
+        $AnalyticsTopology = $null 
+
+        # On 2013 Servers there is no AnalytisTopology accessor. Try getting it the old fashioned way if it's null
+        if((GetSPVersion) -eq "2013")
+        {
+            $AnalyticsTopology = $ssa | Get-SPEnterpriseSearchTopology -Active
+        }
+        else
+        {
+            $AnalyticsTopology = $ssa.AnalyticsTopology
+        }
     
         $finding = New-SPDiagnosticFinding -Name "Analytics Topology" -Severity Default -Format List -InputObject $AnalyticsTopology
         
         if($null -ne $AnalyticsTopology)
         {
-            $components = $ssa.AnalyticsTopology.GetComponents()
+            $components = $AnalyticsTopology.GetComponents()
             foreach($component in $components)
             {
                 $componentFinding = New-SPDiagnosticFinding -Name $component.Name -Severity Default -Format List -InputObject $component
@@ -3841,13 +3853,13 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
                 if(!$definition.EnableReceivers)
                 {
                     $definitionFinding.Severity = [SPDiagnostics.Severity]::Warning
-                    $definitionFinding.Warning += "$tempName SPUsageReceiverDefinition 'EnableReceivers' is false. This will prevent usage collection for this type."
+                    $definitionFinding.WarningMessage += "$tempName SPUsageReceiverDefinition 'EnableReceivers' is false. This will prevent usage collection for this type."
                 }
                 
                 if($definition.Receivers.Count -eq 0)
                 {
                     $definitionFinding.Severity = [SPDiagnostics.Severity]::Warning
-                    $definitionFinding.Warning += "$tempName SPUsageReceiverDefinition is missing its EventReceiver. This may be the case if EnableReceivers is false."
+                    $definitionFinding.WarningMessage += "$tempName SPUsageReceiverDefinition is missing its EventReceiver. This may be the case if EnableReceivers is false."
                 }
     
                 foreach($receiver in $definition.Receivers)
@@ -3959,7 +3971,7 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
         $IsAPCServer = $false
         foreach($apcServer in $apcServers)
         {
-            if($apcServer.Name -ilike $env:COMPUTERNAME)
+            if($apcServer.ServerName -ilike $env:COMPUTERNAME)
             {
                 $IsAPCServer = $true
             }
@@ -3983,7 +3995,8 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
     function GetEventStorePath {
     
         $buildVersion = [string]$Script:SPFarmBuild.Major + "." + [string]$Script:SPFarmBuild.Minor
-        $datapath = (Get-Item "HKLM:\Software\Microsoft\Office Server\$buildVersion\Search\Setup").GetValue("DataDirectory")
+        $regpath = "HKLM:\Software\Microsoft\Office Server\" + $buildVersion + "\Search\Setup"
+        $datapath = (Get-Item $regpath).GetValue("DataDirectory")
     
         $eventshare = Join-Path $datapath "Analytics_$($script:ssa.ApplicationName)"
         $eventstore = Join-Path $eventshare "EventStore"
@@ -4223,7 +4236,7 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
                     if($timespan.Days -gt 3)
                     {
                         $analysisJobFinding.Severity = [SPDiagnostics.Severity]::Warning
-                        $analysisJobFinding.Warning += " It's been more than 3 days since the AnalyticsJobDefinition LastRunCompletedTime was successful"
+                        $analysisJobFinding.WarningMessage += " It's been more than 3 days since the AnalyticsJobDefinition LastRunCompletedTime was successful"
                     }
                 }
                 $jobFinding.ChildFindings.Add($analysisJobFinding)
@@ -4239,10 +4252,10 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
     {
         $ActiveTopology = $ssa.ActiveTopology
         $components = $ActiveTopology.GetComponents() 
-        $AnalyticsProcessComponents = @{}
+        $AnalyticsProcessComponents = @()
         foreach($component in $components)
         {
-            if($component.GetType -like 'AnalyticsProcessingComponent')
+            if($component.GetType().Name -ilike 'AnalyticsProcessingComponent')
             {
                 $AnalyticsProcessComponents += $component
             }
@@ -4576,7 +4589,7 @@ function net46orHigherInstalled ($ServerName)
 {
     if
     (
-        Get-RegistryValue -ServerName $ServerName -Key "SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full" -Property "Release" -ge 393295
+        (Get-RegistryValue -ServerName $ServerName -Key "SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full" -Property "Release") -ge 393295
     )
     {
         return $true
@@ -4710,21 +4723,21 @@ function Get-SPDiagnosticsTlsFinding
     switch ($spVersion) {
         2013
         {
-            $finding.ReferenceLink = "https://docs.microsoft.com/en-us/SharePoint/security-for-sharepoint-server/enable-tls-and-ssl-support-in-sharepoint-2013"
+            $finding.ReferenceLink += New-Object -TypeName Uri -ArgumentList "https://docs.microsoft.com/en-us/SharePoint/security-for-sharepoint-server/enable-tls-and-ssl-support-in-sharepoint-2013"
         }
         2016
         {
-            $finding.ReferenceLink = "https://docs.microsoft.com/en-us/sharepoint/security-for-sharepoint-server/enable-tls-1-1-and-tls-1-2-support-in-sharepoint-server-2016"
+            $finding.ReferenceLink += New-Object -TypeName Uri -ArgumentList "https://docs.microsoft.com/en-us/sharepoint/security-for-sharepoint-server/enable-tls-1-1-and-tls-1-2-support-in-sharepoint-server-2016"
         }
         2019
         {
             $finding.Description += "SharePoint Server 2019 natively support TLS1.2, there are no configurations necessary."
-            $finding.ReferenceLink = "https://docs.microsoft.com/en-us/sharepoint/security-for-sharepoint-server/enable-tls-1-1-and-tls-1-2-support-in-sharepoint-server-2019"
+            $finding.ReferenceLink += New-Object -TypeName Uri -ArgumentList "https://docs.microsoft.com/en-us/sharepoint/security-for-sharepoint-server/enable-tls-1-1-and-tls-1-2-support-in-sharepoint-server-2019"
         }
         SPSE
         {
             $finding.Description += "SharePoint Server Subscription Edition natively support TLS1.2, there are no configurations necessary."
-            $finding.ReferenceLink = "https://docs.microsoft.com/en-us/sharepoint/security-for-sharepoint-server/enable-tls-1-1-and-tls-1-2-support-in-sharepoint-server-2019"
+            $finding.ReferenceLink += New-Object -TypeName Uri -ArgumentList "https://docs.microsoft.com/en-us/sharepoint/security-for-sharepoint-server/enable-tls-1-1-and-tls-1-2-support-in-sharepoint-server-2019"
         }
         Default {}
     }
@@ -4871,15 +4884,18 @@ function main
         {
             $siteUrl = "http://sharepoint"
         }
-        
-        $site = get-spsite $siteUrl
-    
-        if($null -eq $site)
-        {
-            Write-Host "Site $siteUrl Not Found" -ForegroundColor Red
-            return;
-        }
+       
+    }
 
+    if($UsageAndReporting)
+    {
+        $site = get-spsite $siteUrl
+    }
+    
+    if($null -eq $site -and $UsageAndReporting)
+    {
+        Write-Host "Site $siteUrl Not Found" -ForegroundColor Red
+        return;
     }
 
     if($UsageAndReporting -and $site)
