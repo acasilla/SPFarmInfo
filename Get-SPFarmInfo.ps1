@@ -7,19 +7,33 @@
         + Web application urls and alternate access mappings
         + Service applications
         + Authentication methods and configurations
+        + Only collects data, makes no changes
 .EXAMPLE
-    PS C:\> <example usage>
-    Explanation of what the example does
+    PS C:\> Get-SPFarmInfo.PS1 -SkipSearchHealthCheck -TLS 
+    This executes the Get-SPFArmInfo data collection process without the exhaustive search health check and performs additional TLS collect
 .INPUTS
     None at this time
 .OUTPUTS
     An html report documenting findings.
 .NOTES
     General notes
-    Version .1
+    Version 1
+
+DISCLAIMER
+ This script is not supported under any Microsoft standard support program or service. 
+ The script is provided AS IS without warranty of any kind. Microsoft further disclaims 
+ all implied warranties including, without limitation, any implied warranties of merchantability 
+ or of fitness for a particular purpose. The entire risk arising out of the use or performance of 
+ the script and documentation remains with you. In no event shall Microsoft, its authors, 
+ or anyone else involved in the creation, production, or delivery of the scripts be liable for any 
+ damages whatsoever (including, without limitation, damages for loss of business profits, business 
+ interruption, loss of business information, or other pecuniary loss) arising out of the use of or 
+ inability to use the scripts or documentation, even if Microsoft has been advised of the 
+ possibility of such damages     
 #>
+
 param(
-    [Parameter(Position=1,HelpMessage="Displays Help associated with the SPFarmInfo script")]
+    [Parameter(Position=1,HelpMessage="Displays the help associated with the SPFarmInfo script")]
     [switch]$Help,
     [Parameter(Position=2,HelpMessage="Queries MSI and Update Session for Patch Information related to SharePoint")]
     [switch]$PatchInfo,
@@ -30,7 +44,16 @@ param(
     [Parameter(Position=5,HelpMessage="Skips the indepth Search Health Check")]
     [switch]$SkipSearchHealthCheck,
     [Parameter(Position=6,HelpMessage="Performs checks on whether configurations necessary for TLS1.2 and ciphers necessary for connecting to Azure Front Door (M365) are done")]
-    [switch]$TLS
+    [switch]$TLS,
+    [Parameter(Position=7,HelpMessage="Saves Output to TEXT format instead of HTML")]
+    [switch]$Text,
+    [Parameter(Position=8,HelpMessage="Skips appending the SPFarmInfo output with errors collection")]
+    [switch]$SkipErrorCollection,
+    [Parameter(Position=9,HelpMessage="Skips the initial disclaimer")]
+    [switch]$SkipDisclaimer,
+    [Parameter(Position=9,HelpMessage="Hashes servernames in the output")]
+    [switch]$HashServerNames
+    
 )
 
 if([System.IntPtr]::Size -lt 8)
@@ -65,6 +88,11 @@ namespace SPDiagnostics
         List            = 2
     }
 
+    public enum OutputFormat
+    {
+        HTML = 0,
+        TEXT = 1
+    }
     public class Finding
     {
         public Severity Severity
@@ -238,8 +266,6 @@ function New-SPDiagnosticFinding
     return $finding
 }
 
-
-
 # Creates a new FindingCollection for ease of use, TBD whether this is necessary or not
 function New-SPDiagnosticFindingCollection
 {
@@ -249,7 +275,12 @@ function New-SPDiagnosticFindingCollection
     return New-Object SPDiagnostics.FindingCollection[SPDiagnostics.Finding]
 }
 
-
+function ConvertAndStripHTML($html)
+{
+    $string = $html.Replace("<br>","`r`n")
+    $string = $string -replace '<[^>]+>',''
+    return $string
+}
 
 # Internal method that should not be directly consumed outside of the core framework to generate the report
 function Write-DiagnosticFindingFragment
@@ -259,7 +290,8 @@ function Write-DiagnosticFindingFragment
         [Parameter(Mandatory=$false,ValueFromPipeline=$true)]
         [SPDiagnostics.Finding]
         $Finding,
-
+        [SPDiagnostics.OutputFormat]
+        $OutputFormat=[SPDiagnostics.OutputFormat]::HTML,
         [switch]$ExcludeChildFindings
     )
     try
@@ -282,25 +314,90 @@ function Write-DiagnosticFindingFragment
             $expandStr = " open"
         }
 
-        $preContent = "<details{0}><summary class=`"heading {1}`">{2}</summary><div class=`"finding`">" -f $expandStr, $class, $Finding.Name
+        $preContent = $null
+
+        Switch($OutputFormat)
+        {
+            'HTML'
+            {
+                $preContent = "<details{0}><summary class=`"heading {1}`">{2}</summary><div class=`"finding`">" -f $expandStr, $class, $Finding.Name
+            }
+            'TEXT'
+            {
+                $preContent = "#########################################################################################`r`n"
+                $preContent += "{0}`r`n" -f $Finding.Name
+                $preContent += "#########################################################################################`r`n"
+            }
+        }
+
+
         foreach($warningMessage in $finding.WarningMessage)
         {
-            $preContent+="<div class=`"warning-message`"> {0} </div><br>" -f $warningMessage
+            Switch($OutputFormat)
+            {
+                'HTML'
+                {
+                    $preContent+="<div class=`"warning-message`"> {0} </div>" -f $warningMessage
+                }
+                'TEXT'
+                {
+                    # Strip the HTML content from Warning Messages
+                    $warning = ConvertAndStripHTML $warningMessage
+                    $preContent+= "Warning: {0}`r`n`r`n" -f $warning
+                }
+            }
         }
         
         foreach($desc in $finding.Description)
         {
-            $preContent+="<div class=`"description`">{0}</div>" -f $desc
+            Switch($OutputFormat)
+            {
+                'HTML'
+                {
+                    $preContent+="<div class=`"description`">{0}</div>" -f $desc
+                }
+                'TEXT'
+                {
+                    # Strip the HTML content from descriptions
+                    $description = ConvertAndStripHTML $desc
+                    $preContent+= " {0}`r`n" -f $description
+                }
+            }
+            
         }
         
         foreach($link in $Finding.ReferenceLink)
         {
-            $preContent+="<div>Reference: <a href=`"{0}`" target=`"_blank`">{0}</a></div><br/>" -f $link.AbsoluteUri
+            Switch($OutputFormat)
+            {
+                'HTML'
+                {
+                    $preContent+="<div>Reference: <a href=`"{0}`" target=`"_blank`">{0}</a></div><br/>" -f $link.AbsoluteUri
+                }
+                'TEXT'
+                {
+                    $preContent+= " {0}`r`n" -f $link.AbsoluteUri
+                }
+            }
         }
 
-        $postContent = "</details>"
+        $postContent = $null
+
+        Switch($OutputFormat)
+        {
+            'HTML'
+            {
+                $postContent = "</details>"
+            }
+            'TEXT'
+            {
+                $postContent = "`r`n" 
+            }
+        }
         
-        if($null -ne $Finding.InputObject)
+        $htmlFragment = $null
+        
+        if($null -ne $Finding.InputObject -and $OutputFormat -eq [SPDiagnostics.OutputFormat]::HTML)
         {
             #Account for objects that only have a single property, ConverTo-Html does not display the property name if there is only one
             if($Finding.InputObject.GetType().FullName -match "System.Collections.Generic.Dictionary``2" -or $finding.InputObject -is [System.Collections.Hashtable])
@@ -328,6 +425,17 @@ function Write-DiagnosticFindingFragment
                 $htmlFragment = $Finding.InputObject | ConvertTo-Html -PreContent $preContent -As $Finding.Format -Fragment
             }
         }
+        elseif($null -ne $Finding.InputObject -and $OutputFormat -eq [SPDiagnostics.OutputFormat]::TEXT)
+        {
+            if($Finding.Format -eq 'List')
+            {
+                $htmlFragment = $preContent + ($finding.InputObject | Format-List * | Out-String)
+            }
+            else {
+                $htmlFragment = $preContent + ($finding.InputObject | Format-Table * | Out-String)
+            }
+
+        }
         else
         {
             $htmlFragment = $preContent
@@ -337,7 +445,7 @@ function Write-DiagnosticFindingFragment
         {
             foreach($child in $Finding.ChildFindings)
             {
-                $childContent = Write-DiagnosticFindingFragment -Finding $child
+                $childContent = Write-DiagnosticFindingFragment -Finding $child -OutputFormat $OutputFormat
                 $htmlFragment+=$childContent
             }
         }
@@ -353,8 +461,6 @@ function Write-DiagnosticFindingFragment
     }
 }
 
-
-
 #Core function to write html report
 function Write-DiagnosticReport
 {
@@ -362,7 +468,9 @@ function Write-DiagnosticReport
     param (
         [Parameter(Mandatory=$true)]
         [SPDiagnostics.Finding[]]
-        $Findings
+        $Findings, 
+        [Parameter(Mandatory=$false)]
+        [SPDiagnostics.OutputFormat]$OutputFormat=[SPDiagnostics.OutputFormat]::HTML
     )
 
     #Defining CSS to be applied to the report
@@ -470,22 +578,26 @@ $expandAllJS = "// Reference the toggle link
 
     }, false);"
     
+    $html = $null;
+    if($OutputFormat -eq [SPDiagnostics.OutputFormat]::HTML)
+    {
+        $html = "<!DOCTYPE html><head><Title>SPFarmReport - {0}</Title></head><body>" -f $build
+        $html+=$globalCss
+        $html+="<div id=`"topInfo`""
+        $html+="<h1>SPFarmReport - {0}</h1>" -f $build
+        $html+="<p style=`"font-style: italic;`">Generated at {0} UTC</p>" -f [datetime]::UtcNow.ToString("MM/dd/yyyy hh:mm:ss tt")    
+        $html+="<a href='#/' id='expAll' class='col'>Expand All</a>"
+        $html+="<div id=`"ieWarning`" />
+        <script type=`"text/javascript`">
+            var isIe = navigator.userAgent.indexOf(`"Trident`") > -1;
+            if(isIe){
+                document.getElementById(`"expAll`").style.display = `"none`";
+                document.getElementById(`"ieWarning`").innerHTML = `"This report is not optimized for IE for best results open this report in Microsoft Edge.`";
+            }
+        </script>"
+        $html+="</div>"
+    }
 
-    $html = "<!DOCTYPE html><head><Title>SPFarmReport - {0}</Title></head><body>" -f $build
-    $html+=$globalCss
-    $html+="<div id=`"topInfo`""
-    $html+="<h1>SPFarmReport - {0}</h1>" -f $build
-    $html+="<p style=`"font-style: italic;`">Generated at {0} UTC</p>" -f [datetime]::UtcNow.ToString("MM/dd/yyyy hh:mm:ss tt")    
-    $html+="<a href='#/' id='expAll' class='col'>Expand All</a>"
-    $html+="<div id=`"ieWarning`" />
-    <script type=`"text/javascript`">
-        var isIe = navigator.userAgent.indexOf(`"Trident`") > -1;
-        if(isIe){
-            document.getElementById(`"expAll`").style.display = `"none`";
-            document.getElementById(`"ieWarning`").innerHTML = `"This report is not optimized for IE for best results open this report in Microsoft Edge.`";
-        }
-    </script>"
-    $html+="</div>"
 
     # Identify "Critical" and "Warning" findings so that they can be promoted
     $criticalFindings = Get-SPErrorFindings -Findings $Findings -Severity Critical
@@ -495,14 +607,27 @@ $expandAllJS = "// Reference the toggle link
     # If there are critical findings create a "review-section" for critical findings at the top of the report
     if($criticalFindings.Count -ge 1)
     {
-        $html+="<div class=`"review-section`" style=`"border-color:red;`"><div class=`"error heading`">Critical Findings</div>"
+        Switch($OutputFormat)
+        {
+            'HTML'
+            {
+                $html+="<div class=`"review-section`" style=`"border-color:red;`"><div class=`"error heading`">Critical Findings</div>"
+            }
+            'TEXT'
+            {
+                $html+="!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!`r`n"
+                $html+="Critical Findings`r`n"
+                $html+="!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!`r`n"
+            }
+        }
+        
         foreach($finding in $criticalFindings)
         {
             try
             {
                 $expand = $finding.Expand
                 $finding.Expand = $true
-                $fragment = Write-DiagnosticFindingFragment -Finding $finding -ExcludeChildFindings
+                $fragment = Write-DiagnosticFindingFragment -Finding $finding -ExcludeChildFindings -OutputFormat $OutputFormat
                 $html+=$fragment
                 $finding.Expand = $expand
             }
@@ -511,18 +636,43 @@ $expandAllJS = "// Reference the toggle link
                 Write-Warning $_
             }
         }
-        $html+="</div><br>"
+        Switch($OutputFormat)
+        {
+            'HTML'
+            {
+                $html+="</div><br>"
+            }
+            'TEXT'
+            {
+                $html+="!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!`r`n"
+            }
+        }
+
     }
 
     # Similar to critical findings promote any warnings that may be present
     if($warningFindings.Count -ge 1)
     {
-        $html+="<div class=`"review-section`" style=`"border-color:darkorange`"><div class=`"warning heading`">Review Items</div>"
+        Switch($OutputFormat)
+        {
+            'HTML'
+            {
+                $html+="<div class=`"review-section`" style=`"border-color:darkorange`"><div class=`"warning heading`">Review Items</div>"
+            }
+            'TEXT'
+            {
+                $html+="*****************************************************************************************`r`n"
+                $html+="Review Items`r`n"
+                $html+="*****************************************************************************************`r`n"
+            }
+        }
+
+        
         foreach($finding in $warningFindings)
         {
             try
             {
-                $fragment = Write-DiagnosticFindingFragment -Finding $finding -ExcludeChildFindings
+                $fragment = Write-DiagnosticFindingFragment -Finding $finding -ExcludeChildFindings -OutputFormat $OutputFormat
                 $html+=$fragment
             }
             catch
@@ -530,19 +680,43 @@ $expandAllJS = "// Reference the toggle link
                 Write-Warning $_
             }
         }
-        $html+="</div><br>"
+
+        Switch($OutputFormat)
+        {
+            'HTML'
+            {
+                $html+="</div><br>"
+            }
+            'TEXT'
+            {
+                $html+="*****************************************************************************************`r`n"
+            }
+        }
     }
 
 
     # Similar to critical findings promote any warnings that may be present
     if($informationalFindings.Count -ge 1)
     {
-        $html+="<div class=`"review-section`" style=`"border-color:black`"><div class=`"heading`">Informational Items</div>"
+        Switch($OutputFormat)
+        {
+           'HTML'
+            {
+                $html+="<div class=`"review-section`" style=`"border-color:black`"><div class=`"heading`">Informational Items</div>"
+            }
+            'TEXT'
+            {
+                $html+="#########################################################################################`r`n"
+                $html+="Informational Items`r`n"
+                $html+="#########################################################################################`r`n"
+            }
+        }
+        
         foreach($finding in $informationalFindings)
         {
             try
             {
-                $fragment = Write-DiagnosticFindingFragment -Finding $finding -ExcludeChildFindings
+                $fragment = Write-DiagnosticFindingFragment -Finding $finding -ExcludeChildFindings -OutputFormat $OutputFormat
                 $html+=$fragment
             }
             catch
@@ -550,7 +724,18 @@ $expandAllJS = "// Reference the toggle link
                 Write-Warning $_
             }
         }
-        $html+="</div><br>"
+
+        Switch($OutputFormat)
+        {
+            'HTML'
+            {
+                $html+="</div><br>"
+            }
+            'TEXT'
+            {
+                $html+="#########################################################################################`r`n"
+            }
+        }
     }
     
     foreach($finding in $Findings)
@@ -561,7 +746,7 @@ $expandAllJS = "// Reference the toggle link
         }
         try
         {
-            $fragment = Write-DiagnosticFindingFragment -Finding $finding
+            $fragment = Write-DiagnosticFindingFragment -Finding $finding -OutputFormat $OutputFormat
             $html+=$fragment
         }
         catch
@@ -570,8 +755,18 @@ $expandAllJS = "// Reference the toggle link
         }
     }
 
-    $html+=("<script type=`"text/javascript`">{0}</script>" -f $expandAllJS)
-    $html+="</body></html>"
+    Switch($OutputFormat)
+    {
+        'HTML'
+        {
+            $html+=("<script type=`"text/javascript`">{0}</script>" -f $expandAllJS)
+            $html+="</body></html>"
+        }
+        'TEXT'
+        {
+            $html+="#########################################################################################`r`n"
+        }
+    }
 
     return $html
 }
@@ -658,7 +853,7 @@ function Get-SPDiagnosticsSupportDateFinding
 {
     [cmdletbinding()]
     Param()
-    $supportDateFinding = New-SPDiagnosticFinding -Name "Support Dates" -InputObject $null -Format Table -Expand
+    $supportDateFinding = New-SPDiagnosticFinding -Name "Microsoft Support Lifecycle Information" -InputObject $null -Format Table -Expand
     
     $adminWebApp = [Microsoft.SharePoint.Administration.SPAdministrationWebApplication]::Local
     $adminSite = $adminWebApp.sites["/"]
@@ -666,7 +861,7 @@ function Get-SPDiagnosticsSupportDateFinding
 
     $endOfSupportInfo = [PSCustomObject]@{
     }
-
+    
     if($build -eq "SPSE")
     {
         $endOfSupportNotificationLink = "https://go.microsoft.com/fwlink/?LinkId=2198657" #"<a href=`"{0}`" target=`"_blank`">{0}</a>" -f "https://go.microsoft.com/fwlink/?LinkId=2198657"
@@ -694,7 +889,7 @@ function Get-SPDiagnosticsSupportDateFinding
     }
     else
     {
-        " Your version of SharePoint is no longer Supported"
+        " This version of SharePoint is no longer Supported"
         return
     }
     
@@ -718,18 +913,23 @@ function Get-SPDiagnosticsSupportDateFinding
         if([System.DateTime]::Compare($currentDate, $endOfSupportDateWarning) -lt 0)
         {
             $endOfSupportSeverityLevel = "Attention";
+            $supportDateFinding.Severity = [SPDiagnostics.Severity]::Informational
         }
 
         elseif([System.DateTime]::Compare($currentDate, $endOfSupportDate) -lt 0)
         {
             $endOfSupportSeverityLevel = "Warning";
-            $supportDateFinding.Description += "This version of SharePoint Server is in 'Extended' Support.</br> Extended Support provides limited supportability. Microsoft does not accept requests for fixes, design changes, or new features during the Extended Support Phase.</br> Microsoft will only release 'Security' related updates in the patching cycle.</br>"
-        }
+            $supportDateFinding.Severity = [SPDiagnostics.Severity]::Warning
+            $supportDateFinding.WarningMessage += "This version of SharePoint Server is nearing the end of 'Mainstream' support."
+            $supportDateFinding.WarningMessage += "Microsoft does not accept requests for fixes, design changes, or new features during the 'Extended Support' Phase."
+            $supportDateFinding.WarningMessage += "Microsoft will only release 'Security' related updates in the patching cycle." }
         else
         {
             $endOfSupportSeverityLevel = "Alert";
-            $supportDateFinding.WarningMessage += "Support for this version of SharePoint Server has ended!</br> This means that Microsoft Support cannot provide any technical support.</br> Please Upgrade to a supported version of SharePoint"
-        }   
+            $supportDateFinding.Severity = [SPDiagnostics.Severity]::Critical
+            $supportDateFinding.WarningMessage += "This version of SharePoint Server is in 'Extended' Support."
+            $supportDateFinding.WarningMessage += "Microsoft does not accept requests for fixes, design changes, or new features during the 'Extended Support' Phase."
+            $supportDateFinding.WarningMessage += "Microsoft will only release 'Security' related updates in the patching cycle."}   
     }
     else
     {
@@ -738,39 +938,34 @@ function Get-SPDiagnosticsSupportDateFinding
             if([System.DateTime]::Compare($currentDate, $mainstreamSupportDateWarning) -lt 0)
             {
                 $endOfSupportSeverityLevel = "Attention";
+                $supportDateFinding.Severity = [SPDiagnostics.Severity]::Informational
             }
 
             elseif([System.DateTime]::Compare($currentDate, $mainstreamSupportDate) -lt 0)
             {
                 $endOfSupportSeverityLevel = "Warning";
-                $supportDateFinding.Description += "This version of SharePoint Server is in nearing the end of 'Mainstream' support.</br>In 'Extended Support', Microsoft provides limited supportability. Microsoft does not accept requests for fixes, design changes, or new features during the 'Extended Support' Phase.</br> Microsoft will only release 'Security' related updates in the patching cycle.</br>"
+                $supportDateFinding.Severity = [SPDiagnostics.Severity]::Warning
+                $supportDateFinding.WarningMessage += "This version of SharePoint Server is nearing the end of 'Mainstream' support."
+                $supportDateFinding.WarningMessage += "Microsoft does not accept requests for fixes, design changes, or new features during the 'Extended Support' Phase."
+                $supportDateFinding.WarningMessage += "Microsoft will only release 'Security' related updates in the patching cycle."
             }
             else
             {
                 $endOfSupportSeverityLevel = "Alert";
-                $supportDateFinding.Description += "This version of SharePoint Server is in 'Extended' Support.</br> Extended Support provides limited supportability. Microsoft does not accept requests for fixes, design changes, or new features during the Extended Support Phase.</br> Microsoft will only release 'Security' related updates in the patching cycle.</br>"
+                $supportDateFinding.Severity = [SPDiagnostics.Severity]::Critical
+                $supportDateFinding.WarningMessage += "This version of SharePoint Server is in 'Extended' Support."
+                $supportDateFinding.WarningMessage += "Microsoft does not accept requests for fixes, design changes, or new features during the 'Extended Support' Phase."
+                $supportDateFinding.WarningMessage += "Microsoft will only release 'Security' related updates in the patching cycle."
             }   
         }
     }
+        $endOfSupportInfo | Add-Member -MemberType NoteProperty -Name "SPFarm Build" -Value $build
         $endOfSupportInfo | Add-Member -MemberType NoteProperty -Name "Alert" -Value $endOfSupportSeverityLevel
         $endOfSupportInfo | Add-Member -MemberType NoteProperty -Name "Mainstream End Date" -Value $mainstreamSupportDateString
         $endOfSupportInfo | Add-Member -MemberType NoteProperty -Name "Extended End Date" -Value $endOfSupportDateString
-        $endOfSupportInfo | Add-Member -MemberType NoteProperty -Name "Information" -Value $endOfSupportNotificationLink
+        #$endOfSupportInfo | Add-Member -MemberType NoteProperty -Name "Information" -Value $endOfSupportNotificationLink
+        $supportDateFinding.ReferenceLink += $endOfSupportNotificationLink
         
-        #if($mainstreamDateWarning)
-        #{
-        #    $supportDateFinding.WarningMessage += "Your version of SharePoint is in nearing the end of 'Mainstream' support.</br> This means that once we are in 'Extended Support', Microsoft Support cannot file any requests for any 'bugs' or 'change requests.'</br> Microsoft will only release 'Security' related updates in the patching cycle."
-        #}
-        #
-        #if($endOfSupportInfo.Alert -contains "Warning")
-        #{
-        #    $supportDateFinding.WarningMessage += "Your version of SharePoint is in no longer in 'Mainstream' support.</br> This means that Microsoft Support cannot file any requests for any 'bugs' or 'change requests' while in 'Extended' support.</br> Microsoft will only release 'Security' related updates in the patching cycle."
-        #}
-        #if($endOfSupportInfo.Alert -contains "Alert")
-        #{
-        #    $supportDateFinding.WarningMessage += "Your version of SharePoint is in no longer supported.</br> This means that Microsoft Support cannot any technical support.</br> Please Upgrade to a supported version of SharePoint"
-        #}
-
         $supportDateFinding.InputObject =  $endOfSupportInfo
         return $supportDateFinding              
 }
@@ -1073,7 +1268,8 @@ function Get-SPDiagnosticTimerAndAdminServiceFinding
     {
         $timerFinding.Severity = [SPDiagnostics.Severity]::Critical
         $timerFinding.WarningMessage += "One or more Timer Service Instances is not online"
-        $timerFinding.Description+=("Example PowerShell to set the 'Timer Service Instance' object back online.<br/><div class=`"code`">`$farm = Get-SPFarm<br>`$obj = `$farm.GetObject('guid of disabled object')<br/>`$obj.Status = [Microsoft.SharePoint.Administration.SPObjectStatus]::Online<br/>`$obj.Update()</div>Once the above PowerShell is performed you Must restart the 'SharePoint Timer Service' service on that server (within services.msc console)<br/>")
+        $timerFinding.Description+=("Example PowerShell to set the 'Timer Service Instance' object back online.<br/><div class=`"code`">`$farm = Get-SPFarm<br>`$obj = `$farm.GetObject('guid of disabled object')<br/>`$obj.Status = [Microsoft.SharePoint.Administration.SPObjectStatus]::Online<br/>`$obj.Update()</div>")
+        $timerFinding.Description+="Once the above PowerShell is performed the 'SharePoint Timer Service' service on that server must be restarted (within services.msc console)"
         $timerFinding.ReferenceLink += "https://joshroark.com/sharepoint-all-about-one-time-timer-jobs/"
     }
 
@@ -1088,13 +1284,16 @@ function Get-SPDiagnosticTimerAndAdminServiceFinding
     {
         $adminFinding.Severity = [SPDiagnostics.Severity]::Critical
         $adminFinding.WarningMessage = "One or more Admin Service Instances is not online"
-        $adminFinding.Description+=("Example PowerShell to set the 'Admin Service Instance' object back online.<br/><div class=`"code`">`$farm = Get-SPFarm<br>`$obj = `$farm.GetObject('guid of disabled object')<br/>`$obj.Status = [Microsoft.SharePoint.Administration.SPObjectStatus]::Online<br/>`$obj.Update()</div>Once the above PowerShell is performed you Must restart the 'SharePoint Administration' service on that server (within services.msc console)<br/>")
+        $adminFinding.Description +=("Example PowerShell to set the 'Admin Service Instance' object back online.<br/><div class=`"code`">`$farm = Get-SPFarm<br>`$obj = `$farm.GetObject('guid of disabled object')<br/>`$obj.Status = [Microsoft.SharePoint.Administration.SPObjectStatus]::Online<br/>`$obj.Update()</div>")
+        $adminFinding.Description += "Once the above PowerShell is performed the 'SharePoint Administration' service on that server must be restarted (within services.msc console)<br/>"
         $adminFinding.ReferenceLink = "https://joshroark.com/sharepoint-all-about-one-time-timer-jobs/"
     }
 
 
     $finding = New-SPDiagnosticFinding -Name "Timer and Admin Service Instances" -InputObject $null -Format Table
-    $finding.Description += "The 'Timer' and 'Admin' Service Instances are critical for proper SP functionality. They are *not* to be confused with the 'Timer' and 'SP Admin' services within 'services.msc' console. <br/>Your 'services' in the console can be 'running' fine, but if these 'instances' are not Online, then the execution of one-time timer jobs will not function.<br/>This can prevent other service instances from 'provisioning' properly.<br/>"
+    $finding.Description += "The 'Timer' and 'Admin' Service Instances are critical for proper SP functionality. They are *not* to be confused with the 'Timer' and 'SP Admin' services within 'services.msc' console."
+    $finding.Description += "'Services' in the console can be 'running' fine, but if these 'instances' are not Online, then the execution of one-time timer jobs will not function."
+    $finding.Description += "This can prevent other service instances from 'provisioning' properly."
     $finding.ChildFindings.Add($timerFinding)
     $finding.ChildFindings.Add($adminFinding)
 
@@ -1529,7 +1728,7 @@ function Get-SPDiagnosticSearchFindings
         {
             $ssaName = $ssa.DisplayName
             $ssaFindings.Severity = [SPDiagnostics.Severity]::Warning
-            $ssaFindings.WarningMessage+="<li style='color:red'>We have detected that your 'SSA' needs to be upgraded!</li>"
+            $ssaFindings.WarningMessage+="<li style='color:red'>We have detected that the 'SSA' needs to be upgraded!</li>"
             $ssaFindings.WarningMessage+="<li>In order to perform this action, please run the following command: </li>" 
             $ssaFindings.WarningMessage+="<ul style='color:#0072c6'><div class=`"code`">`Upgrade-SPEnterpriseSearchServiceApplication '$ssaName'</div></ul>"
         }
@@ -1538,7 +1737,7 @@ function Get-SPDiagnosticSearchFindings
             $spoProxy = Get-SPServiceApplicationProxy | Where-Object{$_.TypeName -match "SharePoint Online Application Principal Management Service"}
             $spoTenantUri = $spoProxy.OnlineTenantUri.AbsoluteUri
             $ssaFindings.Description+="<li style='color:#063970'>We have detected this is a Cloud SSA.</li>"
-            $ssaFindings.Description+="<li style='color:#063970'>Your SPO Tenant is: </li>"
+            $ssaFindings.Description+="<li style='color:#063970'>The SPO Tenant is: </li>"
             $ssaFindings.Description+="<ul style='color:#727272'>  $spoTenantUri</ul>"
         }
 
@@ -1600,7 +1799,7 @@ function Get-SPDiagnosticsSSAProxyPartition
     {
         $finding.Severity = [SPDiagnostics.Severity]::Warning
         $finding.WarningMessage+="There is no proxy associated with this SSA:  " + $ssaDisplayName
-        $finding.Description+=("In order to create a proxy for this ssa, you should run the following: </br>")
+        $finding.Description+=("In order to create a proxy for this ssa, the following can be executed: </br>")
         $finding.Description+=("<ul style='color:#0072c6'><div class=`"code`">`New-SPEnterpriseSearchServiceApplicationProxy -Name '$ssaDisplayName' -SearchApplication '$ssaDisplayName'<br></div></ul>")
         return $finding
     }
@@ -1609,7 +1808,7 @@ function Get-SPDiagnosticsSSAProxyPartition
         $finding.Severity = [SPDiagnostics.Severity]::Warning
         $finding.WarningMessage +="This SSA, $ssaDisplayName, is not set to 'UnPartitioned'."
         $finding.Description += (" If the SSA is partitioned ( this would have been done at creation time ), URLMapping does not take place and will break contextual searches on Web Apps that have been extended to another zone. ( This can impact queries on extended zone URLs, among other search functions) ")
-        $finding.Description += 'In order to correct this, you would need to either recreate the SSA or set the SSA to "IgnoreTenatization" with the following: '
+        $finding.Description += 'In order to correct this, either recreate the SSA or set the SSA to "IgnoreTenatization" with the following: '
         $finding.Description += "<ul><div style='color:#0072c6' class=`"code`">`$ssa = Get-SPEnterpriseSearchServiceApplication '$ssaDisplayName'<br>`$ssa.SetProperty('IgnoreTenantization', 1)<br>`$ssa.Update()</div><br/></ul>"
     }
     if($ssaProxyPropertiesProperty -ne "UnPartitioned")
@@ -1618,7 +1817,7 @@ function Get-SPDiagnosticsSSAProxyPartition
         $finding.WarningMessage +="The Search Proxy for this SSA is not set to 'UnPartitioned'. "
         $ssaProxyName = $ssaProxy.DisplayName
         $finding.Description +=(" If the proxy is partitioned ( this would have been done at creation time ), URLMapping does not take place and will break contextual searches on Web Apps that have been extended to another zone Property for 'searchProxy.Properties' is set to:  '$ssaProxyPropertiesProperty' ( This can impact queries on extended zone URLs, among other search functions) ")
-        $finding.Description += 'In order to correct this, you would need to delete the SSA Proxy and recreate it with the following: '
+        $finding.Description += 'In order to correct this, Is is recommended to delete the SSA Proxy and recreate it with the following: '
         $finding.Description += "<ul><div style='color:#0072c6' class=`"code`">`Remove-SPEnterpriseSearchServiceApplicationProxy '$ssaProxyName' -Confirm:$false<br>`New-SPEnterpriseSearchServiceApplicationProxy -Name '$ssaDisplayName' -SearchApplication '$ssaDisplayName'<br></div></ul>"
     }
     
@@ -1649,19 +1848,19 @@ function Get-SPDiagnosticsSSATimerJobs
     if(($build -eq "SPSE" -or $build -eq "2019") -and $ssaJobs.Count -lt 9)
     {
         $finding.Severity = [SPDiagnostics.Severity]::Warning
-        $finding.WarningMessage += "We detected your version of SharePoint is missing 1 or more 'SSA' related timer jobs. It's recommended to run the commands in the Description"
+        $finding.WarningMessage += "The detected version of SharePoint is missing 1 or more 'SSA' related timer jobs. It's recommended to run the commands in the Description"
     }
     elseif($build -eq "2016" -and $ssaJobs.Count -lt 8)
     {
         $finding.Severity = [SPDiagnostics.Severity]::Warning
-        $finding.WarningMessage += "We detected your version of SharePoint is missing 1 or more 'SSA' related timer jobs. It's recommended to run the commands in the Description"
+        $finding.WarningMessage += "The detected version of SharePoint is missing 1 or more 'SSA' related timer jobs. It's recommended to run the commands in the Description"
     }
     else
     {
         if($build -eq "2013" -and $ssaJobs.Count -lt 7)
         {
            $finding.Severity = [SPDiagnostics.Severity]::Warning
-           $finding.WarningMessage += "We detected your version of SharePoint is missing 1 or more 'SSA' related timer jobs. It's recommended to run the commands in the Description"
+           $finding.WarningMessage += "The detected version of SharePoint is missing 1 or more 'SSA' related timer jobs. It's recommended to run the commands in the Description"
         }
     }
     $finding.Description+=("SSAs should have several timer jobs associated with them. <br><br>")
@@ -1685,7 +1884,7 @@ function Get-SPDiagnosticsSSATLegacyAdmin
     if($null -eq $searchApplication.SystemManagerLocations)
     {
         $finding.Severity = [SPDiagnostics.Severity]::Critical
-        $finding.WarningMessage+="<li>We detect the 'System Manager Location' to be empty. Your SSA will be broken when this is the case. </li>"
+        $finding.WarningMessage+="<li>We detect the 'System Manager Location' is empty. The SSA will be broken when this is the case. </li>"
     }
     else
     {
@@ -1738,7 +1937,7 @@ function Get-SPDiagnosticsSSACDProp
             {
                 $finding.Severity = [SPDiagnostics.Severity]::Critical
                 $finding.WarningMessage+='<li style="color:red">The ContentDistributor Property on this SSA is corrupt. The crawl will not continue until this is resolved</li>'
-                $finding.WarningMessage+='<li>In the ULS, on the crawl servers, you should see this HResult being thrown: 0x80131537.</li>'
+                $finding.WarningMessage+='<li>In the ULS on the crawl servers, The following HResult may be observed: 0x80131537.</li>'
                 $finding.WarningMessage+='<li>The current property is set to: </li>'
                 $finding.WarningMessage+='<ul style="color:darkblue">' + "  {0}" -f $row + '</ul>'
                 $finding.WarningMessage+='<li>It should appear like:  </li>'
@@ -1746,7 +1945,7 @@ function Get-SPDiagnosticsSSACDProp
             }
             else
             {
-                $finding.Description+=("<li>" + " Checking the Content Distributor Property from SSA Admin DB. If the property contains anything that reflects 'net.tcp:///' instead of 'net.tcp://serverName/, then your crawls will hang. In the ULS, on the crawl servers, you should see this HResult being thrown:   0x80131537." + "</li>")               
+                $finding.Description+=("<li>" + " Checking the Content Distributor Property from SSA Admin DB. If the property contains anything that reflects 'net.tcp:///' instead of 'net.tcp://serverName/, then crawls will hang. In the ULS on the crawl servers, the following HResult may be observed:   0x80131537." + "</li>")               
                 $finding.Description+=("<li>" + "  This SSA's ContentDistributor Property is:" + "</li>")
                 $finding.Description+=('<ul style="color:#0072c6">' + "  {0}" -f $row + '</ul>')
             }
@@ -1937,7 +2136,7 @@ function Get-SPDiagnosticsSSAContentSources
                     $sAddressColl | Add-Member -MemberType NoteProperty -Name "AAMZone" -Value $altUrl.UrlZone
                     $csFinding.WarningMessage +="[" + $altUrl.UrlZone + "] " + $startUri
                     $csFinding.WarningMessage +="--- Non-Default zone may impact Contextual Scopes (e.g. This Site) and other search functionality"
-                    $csFinding.Description += "The only URL that should be crawled should be the 'Default Zone Public URL' and it should be Windows Authentication. If you are crawling both the Default Zone and another Zone URL, you should remove the non Default Zone Url from your start addresses"
+                    $csFinding.Description += "The only URL that should be crawled should be the 'Default Zone Public URL' and it should be Windows Authentication. If crawling both the Default Zone and another Zone URL, the non Default Zone Url should be removed from the start addresses"
                     $csFinding.ReferenceLink +="https://www.ajcns.com/2021/02/problems-crawling-the-non-defaul-zone-for-a-sharepoint-web-application" 
                     $csFinding.Severity = [SPDiagnostics.Severity]::Warning
                     
@@ -2166,12 +2365,12 @@ function Get-SPDiagnosticsSSASearchInstances
         $ssiFinding.WarningMessage = "One or more SearchServiceInstances or HostController Instances are not online "
         $ssiFinding.Description+=("<li>These Service Instances are critical for search to function properly.</li>")
         $ssiFinding.Description+=("<li> If these are Disabled or stuck in a state other than 'Online', then we need to try to start them again to bring to a proper state.</li>")
-        $ssiFinding.Description+=("<li> You will want to run the following PowerShell command:  </li>")
+        $ssiFinding.Description+=("<li> To correct this, consider the following PowerShell command:  </li>")
         $ssiFinding.Description+=('<ul style="color:#0072c6">' + " Start-SPEnterpriseSearchServiceInstance 'serverName'" + "</ul>")
     }
     else
     {
-        $ssiFinding.Description+=('<ul style="color:green"> All of your Search related Service Instances are Online!</ul>')
+        $ssiFinding.Description+=('<ul style="color:green"> All of the Search related Service Instances are Online!</ul>')
     }
     return $ssiFinding
 }
@@ -2207,7 +2406,7 @@ function Get-SPDiagnosticsSSPJobInstances
         foreach($searchServer in $components)
         {
             #$sspJobServiceInstances = $farm.Servers[$searchServer.ServerName].ServiceInstances | Where-Object {$_.TypeName -like "SSP Job Control*"}
-            $sspJobServiceInstances = $farm.Servers[$searchServer.ServerName].ServiceInstances | Where-Object {$_.GetType().Name -like "OfficeServerService"}   
+            $sspJobServiceInstances = $farm.Servers[$searchServer.ServerName].ServiceInstances | Where-Object {$_.Service -like "OfficeServerService"}  
             $problemSspJobServers = $sspJobServiceInstances | Where-Object{$_.Status -ne [Microsoft.SharePoint.Administration.SPObjectStatus]::Online}
             foreach($problemSspInstance in $problemSspJobServers)
             {
@@ -2234,7 +2433,7 @@ function Get-SPDiagnosticsSSPJobInstances
     }
     else
     {
-        $sspJobFinding.Description+=('<ul style="color:green"> All of your SSP Job Control Service Instances are Online</ul>')
+        $sspJobFinding.Description+=('<ul style="color:green"> All of the SSP Job Control Service Instances are Online</ul>')
     }
     return $sspJobFinding
 }
@@ -3910,7 +4109,7 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
                 $finding.WarningMessage  = ($script:UsageAndHealthDataCollectionProxyName + " status is " + $UHDCP.Status)
                 if($UHDCP.Status -eq "Disabled")
                 {
-                    $finding.WarningMessage += "Status is Disabled. You may need to Provision the Usage and Health Data Collection Proxy"
+                    $finding.WarningMessage += "Status is Disabled. The Usage and Health Data Collection Proxy may need to be provisioned."
                     $finding.WarningMessage += '     $UsageAppProxy = Get-SPServiceApplicationProxy | Where {$_.TypeName -eq "Usage and Health Data Collection Proxy"}'
                     $finding.WarningMessage += '     $UsageAppProxy.Provision()'
                 }
@@ -4686,7 +4885,7 @@ function AzureFrontDoorCiphersEnabled ($ServerName)
     if($supportedCiphers.Count -le 0)
     {
         $afdFinding.Severity = [SPDiagnostics.Severity]::Warning
-        $afdFinding.WarningMessage += "No supported ciphers found to communicate with AFD, if you are currently or intending to use hybrid functionality this should be addressed."
+        $afdFinding.WarningMessage += "No supported ciphers found to communicate with AFD. If hybrid functionlity is intending to be used, or currently being used, this should be addressed."
     }
     else
     {
@@ -4696,7 +4895,7 @@ function AzureFrontDoorCiphersEnabled ($ServerName)
         if($priorityWarning)
         {
             #Write-Warning "Priority of Azure Front Door compatible ciphers may be too low"
-            $afdFinding.WarningMessage+="Priority of Azure Front Door compatible ciphers may be too low, if you are encountering issues with hybrid functionality this should be investigated."
+            $afdFinding.WarningMessage+="Priority of Azure Front Door compatible ciphers may be too low. If hybrid functionality is encountering any issues, this should be investigated."
             $afdFinding.Severity = [SPDiagnostics.Severity]::Warning
             $afdFinding.ReferenceLink += "https://learn.microsoft.com/en-us/sharepoint/troubleshoot/administration/authentication-errors-tls12-support"
         }
@@ -4841,6 +5040,77 @@ function Get-SPDiagnosticsTlsFinding
 }
 #endregion
 
+function Get-SPFarmInfoHelp
+{
+    Write-Host "
+        SPFarmInfo
+        SPFarmInfo is used to collect high level information and report on known configuration issues for SharePoint Server 2013 and up. While we strive to ensure compatibility across all versions of SharePoint OnPrem versions, our primary focus is on versions that continue to be supported by Microsoft.
+        
+        Usage
+        Like previous versions of SPFarmInfo, the script can simply be run out of the box to collect information about a single SharePoint Farm. This information includes
+        
+        Farm Information
+        Servers in the farm
+        Services on each Server
+        Service Applications
+        Service Application Proxy Information
+        Proxy Group associations
+        Timer Job Information
+        Web Application and AAMs
+        Side By Side Patching
+        Authentication configuration
+        Search Information
+
+        In addition to the above information collected automatically, the script has other useful switches, some of which gather additional information or perform basic diagnosis.
+        
+        -PatchInfo
+        This requires a nuget provider and module (MSI) to be installed. It checks MSI and WSUS installs and reports back the last few SharePoint patches installed on each server.
+        
+        -UsageAndReporting
+        This will provide additional information specifically designed to troubleshoot Usage and Reporting issues in SharePoint Server and will call out many issues. The information it collects includes
+        
+            Analytics Topology
+            Site and WebRoot Properties specific to Usage and Reporting requirements
+            SPUsageManager and SPUsageService definitions
+            EventStore Folder Details (and permissions)
+            RequestUsage Folder Info and files
+            Usage Analytics TimerJob details
+
+        -SiteUrl
+        Currently only required if using the UsageAndReporting switch. Can be purposed for other uses, and if not provided it will query for a site Url
+        
+        -SkipSearchHealthCheck
+        This allows skipping the exhaustive health check that the SPFarmInfo scripts. Useful if you're not interested in all the search health details.
+        
+        -SkipErrorCollection
+        This skips the collection of errors generating during script execution from being saved in the report. 
+
+        -Text
+        This provides ability to export the script as a TXT file instead of HTML"
+}
+
+function GetMD5Hash($string, $hash)
+{
+    # Convert string to byte array
+    $bytes = [System.Text.Encoding]::ASCII.GetBytes($string)
+
+    # Get the SHA-256 HASH
+    $hasher = $null
+    switch($hash)
+    {
+        "SHA256" {$hasher = [System.Security.Cryptography.SHA256Managed]::Create("SHA-256")}
+        default {$hasher = [System.Security.Cryptography.MD5]::Create("MD5")}
+    }
+
+    # Compute the HASH bytes
+    $hashbytes = $hasher.ComputeHash($bytes)
+
+    # Convert the HashBytes to String and remove -
+    $bytestring = [System.BitConverter]::ToString($hashbytes).Replace("-","")
+    
+
+    return $bytestring
+}
 
 # Main function that calls into building the report and contains the first level findings.
 # Keep this clean and organized to make future additions easier
@@ -4849,6 +5119,20 @@ function main
     [cmdletbinding()]
     Param()
 
+    # If not skipping the disclaimer, display it
+    if(!$SkipDisclaimer)
+    {
+        Write-Host "Disclaimer: SPFarmInfo is a data collection tool only. It does not make any changes to the SharePoint Environment" -ForegroundColor Green
+        Read-Host "Press [ENTER] to continue"
+    }
+
+    # No need to clear out the errors collection if it's not being collected
+    if(!$SkipErrorCollection)
+    {
+        $error.Clear()
+    }
+    
+    # Attempt to add/detect the Micorosft SharePoint Powershell. SPSE loads this automatically in all Powershell instances
     if($null -eq (Get-PSSnapin Microsoft.SharePoint.PowerShell -ErrorAction SilentlyContinue) -and $null -eq (Get-Command Get-SPFarm -ErrorAction SilentlyContinue))
     {
         Add-PSSnapin Microsoft.SharePoint.PowerShell -ErrorAction SilentlyContinue | Out-Null
@@ -4856,15 +5140,15 @@ function main
 
     if($Help)
     {
-        # TODO: HELP
-        Write-Host "Help"
+        Get-SPFarmInfoHelp
         break
     }
 
+    # Warn that PatchInfo requires a Nuget Proider and Microsoft MSI Module to be installed. 
     if($PatchInfo)
     {
         $title    = "PatchInfo Warning"
-        $prompt = "PatchInfo requires a Nuget Provider and Microsoft's MSI Module to be installed. You may be prompted for this. Continue with PatchInfo?"
+        $prompt = "PatchInfo requires a Nuget Provider and Microsoft's MSI Module to be installed. This may be prompt for each server in the farm. Continue with PatchInfo?"
         $choices  = "&Yes", "&No"
 
         $choice = $Host.UI.PromptForChoice($title, $prompt, $choices, 1)
@@ -4920,14 +5204,84 @@ function main
         $rootFindingCollection.Add((Get-SPDiagnosticsTlsFinding))
     }
 
-    $htmlContent = Write-DiagnosticReport -Findings $rootFindingCollection
+    # Collect Errors during script execution for script diagnostics. Can be avoided with -SkipErrorCollection switch
+    if($error.Count -gt 0 -and !$SkipErrorCollection)
+    {
+        # Remove the well known "No Windows PowerShell snap-ins matching the pattern" Error from the collection
+        if($error[$error.Count - 1].Exception.Message.StartsWith("No Windows PowerShell"))
+        {
+            $error.RemoveAt($error.count -1)
+        }
 
-    $fileName = "{0}\SPFarmReport_{1}_{2}" -f $ENV:UserProfile, $build, [datetime]::Now.ToString("yyyy_MM_dd_hh_mm") + ".html"
-    Set-Content -Value $htmlContent -LiteralPath $fileName
+        # If there's still a collection of errors, then report on it.
+        if($error.Count -gt 0)
+        {
+            $errorFinding = New-SPDiagnosticFinding -Name "Script Diagnostics" -InputObject $error -Format List
+            $errorFinding.Description = "These are errors generated ONLY during script execution. They do not represent an issue that needs to be resolved"
+            $errorFinding.Description += "These are intended to assist with identifying SPFarmInfo script issues"
+            $rootFindingCollection.Add($errorFinding)
+        }
+    }
+
+    $diagnosticContent = $null
+    $rootFilname = "SPFarmReport_"
+
+    if($UsageAndReporting)
+    {
+        $fileName = $rootFilname + "UsageAndReporting_"
+    }
+
+    if($TLS)
+    {
+        $fileName = $rootFilname + "TLS_"
+    }
+
+    $fileName = "{0}\$fileName{1}_{2}" -f $ENV:UserProfile, $build, [datetime]::Now.ToString("yyyy_MM_dd_hh_mm")
+
+    if($text)
+    {
+        $diagnosticContent = Write-DiagnosticReport -Findings $rootFindingCollection -OutputFormat TEXT
+        $fileName = $fileName + ".txt"
+    }
+    else
+    {
+        $diagnosticContent = Write-DiagnosticReport -Findings $rootFindingCollection
+        $fileName = $fileName + ".html"
+    }
+  
+    if($HashServerNames)
+    {
+        Write-Host "Generating Hashes for Servernames and Addresses"
+        $serverHashes = @()
+        foreach($server in Get-SPServer)
+        {
+            $serverAddressHash = GetMD5Hash $server.Address
+            $serverNameHash = GetMD5Hash $server.Name
+
+            $diagnosticContent = $diagnosticContent.Replace($server.Address,$serverAddressHash)
+            $diagnosticContent = $diagnosticContent.Replace($server.Name,$serverNameHash)
+
+            $obj = [PSCustomObject]@{
+                Name = $server.Name
+                NameHash = $serverNameHash
+                Address = $server.Address
+                AddressHash = $serverAddressHash
+            }
+            $serverHashes+=$obj
+        }
+    }
+
+    Set-Content -Value $diagnosticContent -LiteralPath $fileName
 
     Invoke-Item $fileName
 
     Write-Host ("`n`nScript complete, review the output file at `"{0}`"" -f $fileName) -ForegroundColor Green
+    
+    if($HashServerNames)
+    {
+        Write-Host "Keep this table for identication purposes, it is not written to the report"
+        Write-Output $serverHashes
+    }
 }
 
 main
