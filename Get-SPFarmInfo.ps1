@@ -3767,7 +3767,9 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
         $AnalyticsTopology = $null 
 
         # On 2013 Servers there is no AnalytisTopology accessor. Try getting it the old fashioned way if it's null
-        if((GetSPVersion) -eq "2013")
+        $spVersion = GetSPVersion
+
+        if(($spVersion) -eq "2013" -or $spVersion -eq "2016")
         {
             $AnalyticsTopology = $ssa | Get-SPEnterpriseSearchTopology -Active
         }
