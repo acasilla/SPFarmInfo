@@ -35,25 +35,33 @@ DISCLAIMER
 param(
     [Parameter(Position=1,HelpMessage="Displays the help associated with the SPFarmInfo script")]
     [switch]$Help,
+
     [Parameter(Position=2,HelpMessage="Queries MSI and Update Session for Patch Information related to SharePoint")]
     [switch]$PatchInfo,
+
     [Parameter(Position=3,HelpMessage="Performs Data Collection to assist in troubleshooting Usage Analysis and Reporting Issues. Requires -SiteUrl parameter")]
     [switch]$UsageAndReporting,
+
     [Parameter(Position=4,HelpMessage="SiteUrl parameter, required for UsageAndReporting check")]
     [string]$SiteUrl,
+
     [Parameter(Position=5,HelpMessage="Skips the indepth Search Health Check")]
     [switch]$SkipSearchHealthCheck,
+
     [Parameter(Position=6,HelpMessage="Performs checks on whether configurations necessary for TLS1.2 and ciphers necessary for connecting to Azure Front Door (M365) are done")]
     [switch]$TLS,
+
     [Parameter(Position=7,HelpMessage="Saves Output to TEXT format instead of HTML")]
     [switch]$Text,
+
     [Parameter(Position=8,HelpMessage="Skips appending the SPFarmInfo output with errors collection")]
     [switch]$SkipErrorCollection,
+
     [Parameter(Position=9,HelpMessage="Skips the initial disclaimer")]
     [switch]$SkipDisclaimer,
+
     [Parameter(Position=9,HelpMessage="Hashes servernames in the output")]
-    [switch]$HashServerNames
-    
+    [switch]$HashServerNames    
 )
 
 if([System.IntPtr]::Size -lt 8)
@@ -137,7 +145,7 @@ Add-Type -TypeDefinition $cs -Language CSharp
 
 #cmdlet used to create new SPDiagnostics.Finding objects for eas of consumption
 #use this method to create diagnostic findings that will be included in the report
-function New-SPDiagnosticFinding
+function New-DiagnosticFinding
 {
     <#
     .SYNOPSIS
@@ -180,7 +188,7 @@ function New-SPDiagnosticFinding
     
     .EXAMPLE
     $sts = Get-SPSecurityTokenServiceConfig
-    $finding = New-SPDiagnosticFinding -Name "Security Token Service Config" -Description "Details of Get-SPSecurityTokenServiceConfig" -Category Authentication -Severity Default -InputObject $sts -Format Table
+    $finding = New-DiagnosticFinding -Name "Security Token Service Config" -Description "Details of Get-SPSecurityTokenServiceConfig" -Category Authentication -Severity Default -InputObject $sts -Format Table
     
     .NOTES
     General notes
@@ -267,7 +275,7 @@ function New-SPDiagnosticFinding
 }
 
 # Creates a new FindingCollection for ease of use, TBD whether this is necessary or not
-function New-SPDiagnosticFindingCollection
+function New-DiagnosticFindingCollection
 {
     [cmdletbinding()]
     Param()
@@ -583,8 +591,8 @@ $expandAllJS = "// Reference the toggle link
     {
         $html = "<!DOCTYPE html><head><Title>SPFarmReport - {0}</Title></head><body>" -f $build
         $html+=$globalCss
-        $html+="<div id=`"topInfo`""
-        $html+="<h1>SPFarmReport - {0}</h1>" -f $build
+        $html+="<div id=`"topInfo`">"
+        $html+="<h1>SPFarmReport - {0} [{1}]</h1>" -f $build, [Microsoft.SharePoint.Administration.SPFarm]::Local.BuildVersion.ToString()
         $html+="<p style=`"font-style: italic;`">Generated at {0} UTC</p>" -f [datetime]::UtcNow.ToString("MM/dd/yyyy hh:mm:ss tt")    
         $html+="<a href='#/' id='expAll' class='col'>Expand All</a>"
         $html+="<div id=`"ieWarning`" />
@@ -600,9 +608,9 @@ $expandAllJS = "// Reference the toggle link
 
 
     # Identify "Critical" and "Warning" findings so that they can be promoted
-    $criticalFindings = Get-SPErrorFindings -Findings $Findings -Severity Critical
-    $warningFindings = Get-SPErrorFindings -Findings $Findings -Severity Warning
-    $informationalFindings = Get-SPErrorFindings -Findings $Findings -Severity Informational
+    $criticalFindings = Get-DiagnosticErrorFindings -Findings $Findings -Severity Critical
+    $warningFindings = Get-DiagnosticErrorFindings -Findings $Findings -Severity Warning
+    $informationalFindings = Get-DiagnosticErrorFindings -Findings $Findings -Severity Informational
     
     # If there are critical findings create a "review-section" for critical findings at the top of the report
     if($criticalFindings.Count -ge 1)
@@ -771,7 +779,7 @@ $expandAllJS = "// Reference the toggle link
     return $html
 }
 
-function Get-SPErrorFindings {
+function Get-DiagnosticErrorFindings {
     [CmdletBinding()]
     param (
         [Parameter(Mandatory=$true)]
@@ -783,7 +791,7 @@ function Get-SPErrorFindings {
         $Severity
     )
     
-    $returnFindings = New-SPDiagnosticFindingCollection #New-Object SPDiagnostics.FindingCollection
+    $returnFindings = New-DiagnosticFindingCollection #New-Object SPDiagnostics.FindingCollection
     foreach($finding in $Findings)
     {
         if($null -ne $finding)
@@ -796,7 +804,7 @@ function Get-SPErrorFindings {
             {
                 if($null -ne $ChildFinding)
                 {
-                    $returnFindings+=(Get-SPErrorFindings -Findings $ChildFinding -Severity $Severity -ErrorAction SilentlyContinue)
+                    $returnFindings+=(Get-DiagnosticErrorFindings -Findings $ChildFinding -Severity $Severity -ErrorAction SilentlyContinue)
                 }
             }
         }
@@ -807,8 +815,10 @@ function Get-SPErrorFindings {
 #endregion
 
 #SPVersion Function
-function GetSPVersion($buildPrefix)
+function Get-SPVersion
 {
+    [CmdletBinding()]
+    param ()
     $farm = [Microsoft.SharePoint.Administration.SPFarm]::Local
     $script:SPFarm = $farm
     $Script:SPFarmBuild = $script:SPFarm.BuildVersion
@@ -819,20 +829,20 @@ function GetSPVersion($buildPrefix)
         {
             if($farm.BuildVersion.Build -ge 14326)
             {
-                $buildFoo = "SPSE"
+                $retval = "SPSE"
             }
             elseif($farm.BuildVersion.Build -ge 10337 -and $farm.BuildVersion.Build -lt 14320)
             {
-                $buildFoo = "2019"
+                $retval = "2019"
             }
             else
             {
-                $buildFoo = "2016"
+                $retval = "2016"
             }
         }
         else
         {
-            $buildFoo = "2013"
+            $retval = "2013"
         }
 
     }
@@ -846,50 +856,50 @@ function GetSPVersion($buildPrefix)
         Write-Warning "Unsupported Version of SP... Aborting script"
         exit
     }
-    return $buildFoo
+    return $retval
 }
 
-function Get-SPDiagnosticsSupportDateFinding
+function Get-SPDiagnosticSupportDateFinding
 {
     [cmdletbinding()]
     Param()
-    $supportDateFinding = New-SPDiagnosticFinding -Name "Microsoft Support Lifecycle Information" -InputObject $null -Format Table -Expand
+    $supportDateFinding = New-DiagnosticFinding -Name "Microsoft Support Lifecycle Information" -InputObject $null -Format Table -Expand
     
     $adminWebApp = [Microsoft.SharePoint.Administration.SPAdministrationWebApplication]::Local
     $adminSite = $adminWebApp.sites["/"]
-    $build = GetSPVersion $buildPrefix
+    $build = Get-SPVersion
 
     $endOfSupportInfo = [PSCustomObject]@{
     }
     
     if($build -eq "SPSE")
     {
-        $endOfSupportNotificationLink = "https://go.microsoft.com/fwlink/?LinkId=2198657" #"<a href=`"{0}`" target=`"_blank`">{0}</a>" -f "https://go.microsoft.com/fwlink/?LinkId=2198657"
+        $endOfSupportNotificationLink = New-Object System.Uri "https://go.microsoft.com/fwlink/?LinkId=2198657"
         $mainstreamSupportDate = [System.TimeZoneInfo]::ConvertTimeToUtc((New-Object DateTime 2199, 12, 1), [System.TimeZoneInfo]::FindSystemTimeZoneById("Pacific Standard Time"));
         $endOfSupportDate = [System.TimeZoneInfo]::ConvertTimeToUtc((New-Object DateTime 2199, 12, 1), [System.TimeZoneInfo]::FindSystemTimeZoneById("Pacific Standard Time"));
         
     }
     elseif($build -eq "2019")
     {
-        $endOfSupportNotificationLink = "https://go.microsoft.com/fwlink/?LinkId=2198656" #"<a href=`"{0}`" target=`"_blank`">{0}</a>" -f "https://go.microsoft.com/fwlink/?LinkId=2198656"
+        $endOfSupportNotificationLink = New-Object System.Uri "https://go.microsoft.com/fwlink/?LinkId=2198656"
         $mainstreamSupportDate = [System.TimeZoneInfo]::ConvertTimeToUtc((New-Object DateTime 2024, 1, 9), [System.TimeZoneInfo]::FindSystemTimeZoneById("Pacific Standard Time"));
         $endOfSupportDate = [System.TimeZoneInfo]::ConvertTimeToUtc((New-Object DateTime 2026, 7,14), [System.TimeZoneInfo]::FindSystemTimeZoneById("Pacific Standard Time"));
     }
     elseIf($build -eq "2016")
     {
-        $endOfSupportNotificationLink = "https://go.microsoft.com/fwlink/?LinkId=2198655" #"<a href=`"{0}`" target=`"_blank`">{0}</a>" -f "https://go.microsoft.com/fwlink/?LinkId=2198655"
+        $endOfSupportNotificationLink = New-Object System.Uri  "https://go.microsoft.com/fwlink/?LinkId=2198655"
         $mainstreamSupportDate = [System.TimeZoneInfo]::ConvertTimeToUtc((New-Object DateTime 2021, 7, 13), [System.TimeZoneInfo]::FindSystemTimeZoneById("Pacific Standard Time"));
         $endOfSupportDate = [System.TimeZoneInfo]::ConvertTimeToUtc((New-Object DateTime 2026, 7, 14), [System.TimeZoneInfo]::FindSystemTimeZoneById("Pacific Standard Time"));
     }
     elseif($build -eq "2013")
     {
-        $endOfSupportNotificationLink = "https://go.microsoft.com/fwlink/?LinkId=2198654" #"<a href=`"{0}`" target=`"_blank`">{0}</a>" -f "https://go.microsoft.com/fwlink/?LinkId=2198654"
+        $endOfSupportNotificationLink = New-Object System.Uri "https://go.microsoft.com/fwlink/?LinkId=2198654"
         $mainstreamSupportDate = [System.TimeZoneInfo]::ConvertTimeToUtc((New-Object DateTime 2018, 4, 10), [System.TimeZoneInfo]::FindSystemTimeZoneById("Pacific Standard Time"));
         $endOfSupportDate = [System.TimeZoneInfo]::ConvertTimeToUtc((New-Object DateTime 2023, 4, 11), [System.TimeZoneInfo]::FindSystemTimeZoneById("Pacific Standard Time"));
     }
     else
     {
-        " This version of SharePoint is no longer Supported"
+        Write-Warning "It appears that this script is running a pre-SharePoint 2013 environment, experiences may be inconsistent"
         return
     }
     
@@ -921,14 +931,14 @@ function Get-SPDiagnosticsSupportDateFinding
             $endOfSupportSeverityLevel = "Warning";
             $supportDateFinding.Severity = [SPDiagnostics.Severity]::Warning
             $supportDateFinding.WarningMessage += "This version of SharePoint Server is nearing the end of 'Mainstream' support."
-            $supportDateFinding.WarningMessage += "Microsoft does not accept requests for fixes, design changes, or new features during the 'Extended Support' Phase."
+            $supportDateFinding.WarningMessage += "Microsoft does not accept requests for fixes, design changes, or new features during the 'Extended Support' phase."
             $supportDateFinding.WarningMessage += "Microsoft will only release 'Security' related updates in the patching cycle." }
         else
         {
             $endOfSupportSeverityLevel = "Alert";
             $supportDateFinding.Severity = [SPDiagnostics.Severity]::Critical
             $supportDateFinding.WarningMessage += "This version of SharePoint Server is in 'Extended' Support."
-            $supportDateFinding.WarningMessage += "Microsoft does not accept requests for fixes, design changes, or new features during the 'Extended Support' Phase."
+            $supportDateFinding.WarningMessage += "Microsoft does not accept requests for fixes, design changes, or new features during the 'Extended Support' phase."
             $supportDateFinding.WarningMessage += "Microsoft will only release 'Security' related updates in the patching cycle."}   
     }
     else
@@ -970,11 +980,13 @@ function Get-SPDiagnosticsSupportDateFinding
         return $supportDateFinding              
 }
 
+
+#region FarmFindings
 Function Get-SPDiagnosticFarmFindings
 {
     [cmdletbinding()]
     Param()
-    $farmFindings = New-SPDiagnosticFinding -Name "Farm configuration" -InputObject $null
+    $farmFindings = New-DiagnosticFinding -Name "Farm configuration" -InputObject $null
     $farmFindings.ChildFindings.Add((Get-SPDiagnosticFarmBuildInfo))
     $farmFindings.ChildFindings.Add((Get-SPDiagnosticServersInFarm))
     $farmFindings.ChildFindings.Add((Get-SPDiagnosticServicesOnServer))
@@ -995,7 +1007,7 @@ function Get-SPDiagnosticFarmBuildInfo
     $configDb = Get-SPDatabase | Where-Object{$_.TypeName -match "Configuration Database"}
     $SPDiagnosticConfig = Get-SPDiagnosticConfig
     $LogLevel = Get-SPLogLevel
-    $countOfVerboseEx = ($LogLevel | Where-Object{$_.TraceSeverity -eq "VerboseEx"} | measure-object | select-object Count).Count
+    $countOfVerboseEx = ($LogLevel | Where-Object{$_.TraceSeverity -eq "VerboseEx" -and $_.TraceSeverity -ne $_.DefaultTraceSeverity}| measure-object | select-object Count).Count
 
 
     $retObj = [PSCustomObject]@{
@@ -1010,15 +1022,45 @@ function Get-SPDiagnosticFarmBuildInfo
         ConfigDbSql = $configDb.ServiceInstance.Server.Address
         ConfigDbInstance = $configDb.ServiceInstance.Instance
     }
-    $finding = New-SPDiagnosticFinding -Name "Farm Info" -Description "Farm build, ULS Location, and config db" -InputObject $retObj -Format List -Expand 
+    $finding = New-DiagnosticFinding -Name "Farm Info" -Description "Farm build, ULS Location, and config db" -InputObject $retObj -Format List -Expand 
 
     if($countOfVerboseEx -gt 0 -or $countOfVerboseEx -gt 0 -or $countOfVerboseEvents)
     {
         $finding.Severity = [SPDiagnostics.Severity]::Warning
-        $finding.WarningMessage = "TraceSeverity is set to VerboseEx on $countOfVerboseEx LogLevel(s). This may cause performance issues"
+        $finding.WarningMessage = "TraceSeverity is set to VerboseEx on $countOfVerboseEx LogLevel(s). This may cause performance issues. If this loggging is not necessary reset the logging to default either from Central Administration > Monitoring > Configur Diagnostic Logging or by running the 'Clear-SPLogLevel' command from the SharePoint management shell."
     }
     return $finding
 
+}
+
+function Get-SPDiagnosticsSqlAlias
+{
+    $servers = Get-SPServer | Where-Object{$_.Role -ne [Microsoft.SharePoint.Administration.SPServerRole]::Invalid}
+    $serverAliases = @()
+    foreach($server in $servers)
+    {
+        try
+        {
+            $registryHive  = [Microsoft.Win32.RegistryHive]::LocalMachine
+            $reg = [Microsoft.Win32.RegistryKey]::OpenRemoteBaseKey($registryHive, $server.Name)
+            $key = $reg.OpenSubKey("SOFTWARE\\Microsoft\\MSSQLServer\\Client\\ConnectTo")
+            $aliases = $key.GetValueNames()
+            foreach($alias in $aliases)
+            {
+                $serverAliases += [PSCustomObject]@{
+                    Server = $server.Name
+                    ServerAlias = $alias
+                    ConnectionString = $key.GetValue($alias).ToString().Replace("DBMSSOCN,", "").Replace("DBNMPNTW,","")
+                }
+            }
+        }
+        catch
+        {}
+    }
+    if($serverAliases.Count -ge 1)
+    {
+        return New-DiagnosticFinding -Name "Sql Aliases" -InputObject $serverAliases -Format Table -Description "SQL Server aliases that are currently configured in cliconfg"
+    }
 }
 
 function Get-SPDiagnosticServersInFarm
@@ -1067,7 +1109,7 @@ function Get-SPDiagnosticServersInFarm
         }
     }
     
-    $finding = New-SPDiagnosticFinding -Name "Servers in Farm" -Severity Default -InputObject $serverColl -Format Table -Expand
+    $finding = New-DiagnosticFinding -Name "Servers in Farm" -Severity Default -InputObject $serverColl -Format Table -Expand
 
     if($PatchInfo)
     {
@@ -1083,6 +1125,12 @@ function Get-SPDiagnosticServersInFarm
         $finding.Severity = $productStatusLevel
         $finding.WarningMessage = "Inconsistent patch or upgrade state identified, please complete relevant actions on the identified servers"
         $finding.Expand = $false
+    }
+
+    $sqlAliasFinding = Get-SPDiagnosticsSqlAlias
+    if($sqlAliasFinding.InputObject.Count -ge 1)
+    {
+        $finding.ChildFindings.Add($sqlAliasFinding)
     }
 
     return $finding
@@ -1213,7 +1261,7 @@ function Get-SPPatchInfo
 
     if($null -ne $refined)
     {
-        $patchFinding = New-SPDiagnosticFinding -Name $server.DisplayName -Severity Default -InputObject $refined -format Table -Description "Patching Information"
+        $patchFinding = New-DiagnosticFinding -Name $server.DisplayName -Severity Default -InputObject $refined -format Table -Description "Patching Information"
         return $patchFinding
     }
 
@@ -1241,7 +1289,7 @@ function Get-SPDiagnosticServicesOnServer
         }
     }
 
-    $finding = New-SPDiagnosticFinding -Name "Services on Server" -InputObject $runningServices -Format Table
+    $finding = New-DiagnosticFinding -Name "Services on Server" -InputObject $runningServices -Format Table
     
     $troubleServices = $runningServices | Where-Object{$_.Status -ne [Microsoft.SharePoint.Administration.SPObjectStatus]::Online}
     if($null -ne $troubleServices)
@@ -1262,7 +1310,7 @@ function Get-SPDiagnosticTimerAndAdminServiceFinding
     $timerInstances = $farm.TimerService.Instances | Select-Object @{l="Server";e={$_.Server.Address}}, Status, AllowServiceJobs, AllowContentDatabaseJobs, Id
     $problemTimerInstances = $timerInstances | Where-Object{$_.Status -ne [Microsoft.SharePoint.Administration.SPObjectStatus]::Online}
     
-    $timerFinding = New-SPDiagnosticFinding -Name "Timer Service Instances" -InputObject $timerInstances -Format Table
+    $timerFinding = New-DiagnosticFinding -Name "Timer Service Instances" -InputObject $timerInstances -Format Table
 
     if($null -ne $problemTimerInstances)
     {
@@ -1278,7 +1326,7 @@ function Get-SPDiagnosticTimerAndAdminServiceFinding
     $adminInstances = $adminSvc.Instances | Select-Object @{l="Server";e={$_.Server.Address}}, Status, Id
     $problemAdminInstances = $adminInstances | Where-Object{$_.Status -ne [Microsoft.SharePoint.Administration.SPObjectStatus]::Online}
     
-    $adminFinding = New-SPDiagnosticFinding -Name "Administration Service Instances" -InputObject $adminInstances -Format Table
+    $adminFinding = New-DiagnosticFinding -Name "Administration Service Instances" -InputObject $adminInstances -Format Table
 
     if($null -ne $problemAdminInstances)
     {
@@ -1290,7 +1338,7 @@ function Get-SPDiagnosticTimerAndAdminServiceFinding
     }
 
 
-    $finding = New-SPDiagnosticFinding -Name "Timer and Admin Service Instances" -InputObject $null -Format Table
+    $finding = New-DiagnosticFinding -Name "Timer and Admin Service Instances" -InputObject $null -Format Table
     $finding.Description += "The 'Timer' and 'Admin' Service Instances are critical for proper SP functionality. They are *not* to be confused with the 'Timer' and 'SP Admin' services within 'services.msc' console."
     $finding.Description += "'Services' in the console can be 'running' fine, but if these 'instances' are not Online, then the execution of one-time timer jobs will not function."
     $finding.Description += "This can prevent other service instances from 'provisioning' properly."
@@ -1306,11 +1354,11 @@ function Get-SPDiagnosticServiceAppInfo
     [cmdletbinding()]
     Param()
     $serviceApps = Get-SPServiceApplication | Select-Object DisplayName, TypeName, Id, Status
-    $serviceAppFinding = New-SPDiagnosticFinding -Name "Service Applications" -InputObject $serviceApps -Format Table
+    $serviceAppFinding = New-DiagnosticFinding -Name "Service Applications" -InputObject $serviceApps -Format Table
 
     ## Dump out proxies as well
     $proxies = Get-SPServiceApplicationProxy | Select-Object DisplayName, TypeName, Id, Status
-    $proxyFinding = New-SPDiagnosticFinding -Name "Service Application Proxies" -InputObject $proxies -Format Table
+    $proxyFinding = New-DiagnosticFinding -Name "Service Application Proxies" -InputObject $proxies -Format Table
 
     ## As a child finding dump out the service application associations
     $proxyGroups = Get-SPServiceApplicationProxyGroup
@@ -1325,12 +1373,96 @@ function Get-SPDiagnosticServiceAppInfo
             }
         }
     }
-    $proxyGroupFinding = New-SPDiagnosticFinding -Name "Proxy Group Associations" -InputObject $proxyGroupObjects -Format Table
+    $proxyGroupFinding = New-DiagnosticFinding -Name "Proxy Group Associations" -InputObject $proxyGroupObjects -Format Table
 
     $serviceAppFinding.ChildFindings.Add($proxyFinding)
     $serviceAppFinding.ChildFindings.Add($proxyGroupFinding)
+    $serviceAppFinding.ChildFindings.Add((Get-SPDiagnosticsUserProfileFinding))
+
+
 
     return $serviceAppFinding
+}
+
+function Get-SPDiagnosticsUserProfileFinding
+{
+    [CmdletBinding()]
+    param ()
+
+    $upaService = [Microsoft.SharePoint.Administration.SPFarm]::Local.Services | Where-Object{$_.TypeName -match "User Profile Service"}
+    if($upaService.Applications.Count -eq 0)
+    {
+        return
+    }
+    foreach($upa in $upaService.Applications)
+    {
+        $serviceContext = [Microsoft.SharePoint.SPServiceContext]::GetContext($upa.ServiceApplicationProxyGroup, [guid]::Empty)
+        
+        $configManager = New-Object -TypeName "Microsoft.Office.Server.UserProfiles.UserProfileConfigManager" -ArgumentList $serviceContext
+
+        $syncConnections = @()
+        foreach($connection in $configManager.ConnectionManager)
+        {
+            if($configManager.ConnectionManager.Type -ne "ActiveDirectoryImport")
+            {
+                ##Not AD import, skip
+                ##Perhaps add as a finding for customers using FIM, however this would only affect SP13 which is nearly out of support.
+                continue
+            }
+            # this would only return for ADImport
+            $adConnection = [Microsoft.Office.Server.UserProfiles.ActiveDirectoryImportConnection]$connection
+            
+            $flags = [System.Reflection.BindingFlags]"Instance","NonPublic"
+            $type = $adConnection.GetType()
+            $field = $type.GetField("namingContexts", $flags)
+            $namingContexts = $field.GetValue($adConnection)
+
+            $ousStr = [string]::Empty
+            foreach($namingContext in $namingContexts)
+            {
+                foreach($ou in $namingContext.ContainersIncluded)
+                {
+                    [string]$ousStr += $ou + "; "
+                }
+            }
+            $adConnection_OUs = $ousStr.TrimEnd("; ")
+
+            $field = $type.GetField("server", $flags)
+            $adConnection_server = $field.GetValue($adConnection)
+
+            $field = $type.GetField("useSSL", $flags)
+            $adConnection_useSSL = $field.GetValue($adConnection)
+
+            $field = $type.GetField("useDisabledFilter", $flags)
+            $adConnection_useDisabledFilter = $field.GetValue($adConnection)
+
+            $field = $type.GetField("ldapFilter", $flags)
+            $adConnection_ldapFilter = $field.GetValue($adConnection)
+
+            ##$field = $type.GetField("spsClaimProviderTypeValue", $flags)
+            ##$adConnection_spsClaimProviderTypeValue = $field.GetValue($adConnection)
+
+            ##$field = $type.GetField("spsClaimProviderIdValue", $flags)
+            ##$adConnection_spsClaimProviderIdValue = $field.GetValue($adConnection)
+
+            $syncConnections += [PSCustomObject]@{
+                Name = $adConnection.DisplayName
+                Server = $adConnection_server
+                UseSSL = $adConnection_useSSL
+                SelectedOUs = $adConnection_OUs
+                UseDisabledFilter = $adConnection_useDisabledFilter
+                LdapFilter = $adConnection_ldapFilter
+                #ClaimProviderType = $adConnection_spsClaimProviderTypeValue
+                #ClaimProviderId = $adConnection_spsClaimProviderIdValue
+            }
+        }
+
+        $syncConnectionFinding = New-DiagnosticFinding -Name ("Sync Connections: {0}" -f $upa.DisplayName) -InputObject $syncConnections -Format Table
+    }
+    $upaJobs = $upaService.JobDefinitions | Select-Object Name, Schedule, LastRunTime
+    $upaFinding = New-DiagnosticFinding -Name "User Profile Service" -InputObject $upaJobs -Format table
+    $upaFinding.ChildFindings.Add($syncConnectionFinding)
+    return $upaFinding
 }
 
 function Invoke-SPSqlCommand
@@ -1383,7 +1515,7 @@ function Get-SPDiagnosticTimerJobHistoryFinding
 
     $result2 = Invoke-SPSqlCommand -spDatabase $configDb -query "Select MIN(EndTime) as Oldest, MAX(EndTime) as Newest from TimerJobHistory with(nolock)"
 
-    $finding = New-SPDiagnosticFinding -Name "TimerJobHistory" -Description ("<ul><li>The timer job history table currently has {0} rows</li>" -f $rowCount.ToString('N0')) -InputObject $null -Format Table
+    $finding = New-DiagnosticFinding -Name "TimerJobHistory" -Description ("<ul><li>The timer job history table currently has {0} rows</li>" -f $rowCount.ToString('N0')) -InputObject $null -Format Table
     if($rowCount -ge $warningRowCount)
     {
         $finding.Severity = [SPDiagnostics.Severity]::Warning
@@ -1423,16 +1555,16 @@ function Get-SPDiagnosticsWebAppsFinding
 {
     [cmdletbinding()]
     Param()
-    $webAppsFinding = New-SPDiagnosticFinding -Name "Web Applications & AAMs"
+    $webAppsFinding = New-DiagnosticFinding -Name "Web Applications & AAMs"
     $webApps = Get-SPWebApplication -IncludeCentralAdministration
     foreach($webApp in $webApps)
     {
         $aams = $webApp.AlternateUrls | Select-Object -Property IncomingUrl, Zone, PublicUrl | Sort-Object -Property Zone
         $webAppName = "Web Application: '" + $webApp.DisplayName + "' (" + $webApp.Url + ") || (DB Count: " + $webApp.ContentDatabases.Count + " | " + "Site Count: " + $webApp.Sites.Count + ")"
-        $webAppFinding = New-SPDiagnosticFinding -Name $webAppName -InputObject $aams -Format Table
+        $webAppFinding = New-DiagnosticFinding -Name $webAppName -InputObject $aams -Format Table
 
         $dbInfo = $webApp.ContentDatabases | Select-Object Name, @{N='SiteCount'; E={$_.CurrentSiteCount}}, Id, Status, BuildVersion, @{N='DB Server'; E={$_.NormalizedDataSource}},@{N="DB Size(GB)"; E={$([string]([System.Math]::Round($_.DiskSizeRequired/1gb,2)))}}, IsReadOnly, IsAttachedToFarm, IsSqlAzure, PreferredTimerServerInstance
-        $cdbfinding = New-SPDiagnosticFinding -Name "Content Database(s) Information" -Severity Default -InputObject $dbInfo -Format Table
+        $cdbfinding = New-DiagnosticFinding -Name "Content Database(s) Information" -Severity Default -InputObject $dbInfo -Format Table
         $webAppFinding.ChildFindings.Add($cdbfinding)
 
         # itterate through aams to get zones to check to be sure to not miss manually created aams
@@ -1450,11 +1582,11 @@ function Get-SPDiagnosticsWebAppsFinding
                 else
                 {
                     $iisSettingName = "IIS Settings: " + " -- Zone: " + $aam.Zone + " | Url:  " + $aam.PublicUrl
-                    $iisSettingsFinding = New-SPDiagnosticFinding -Name $iisSettingName -InputObject $null -Format List
+                    $iisSettingsFinding = New-DiagnosticFinding -Name $iisSettingName -InputObject $null -Format List
                     $iisSettingsObj = $iisSettings | Select-Object ServerComment, Path, PreferredInstanceId, AuthenticationMode, MembershipProvider, RoleManager, AllowAnonymous, EnableClientIntegration, UseWindowsIntegratedAuthentication, UseBasicAuthentication, DisableKerberos, ClaimsAuthenticationRedirectionUrl, ClientObjectModelRequiresUseRemoteAPIsPermission
                     $iisSettingsFinding.InputObject = $iisSettingsObj
 
-                    $iisBindingFinding = New-SPDiagnosticFinding -Name "IIS Bindings" -InputObject $null -Format List
+                    $iisBindingFinding = New-DiagnosticFinding -Name "IIS Bindings" -InputObject $null -Format List
 
                     $iisBindingFinding.InputObject += $iisSettings.ServerBindings
                     $iisBindingFinding.InputObject += $iisSettings.SecureBindings
@@ -1498,7 +1630,7 @@ function Get-SPDiagnosticsSideBySidePathcingFinding
         SideBySideTokenMatchesFarmBuild = $sbsTokenIsCurrent
     }
 
-    $finding = New-SPDiagnosticFinding `
+    $finding = New-DiagnosticFinding `
         -Name "Side by Side Patching"  `
         -ReferenceLink "https://blog.stefan-gossner.com/2017/01/10/sharepoint-server-2016-patching-using-side-by-side-functionality-explained/" `
         -InputObject $retObj `
@@ -1511,11 +1643,13 @@ function Get-SPDiagnosticsSideBySidePathcingFinding
     return $finding
 }
 
+#endregion
+
 #region Auth
 
 function Get-SPDiagnosticAuthFindings
 {
-    $authFindings = New-SPDiagnosticFinding -Name "Authentication" -Severity Default -InputObject $null
+    $authFindings = New-DiagnosticFinding -Name "Authentication" -Severity Default -InputObject $null
     $authFindings.ChildFindings.Add((Get-SPDiagnosticsWebAppAuthSettingsFinding))
     $authFindings.ChildFindings.Add((Get-SPDiagnosticsSPSecurityTokenServiceConfigFinding))
     $authFindings.ChildFindings.Add((Get-SPDiagnosticsSPTrustedIdentityTokenIssuerFinding))
@@ -1571,7 +1705,7 @@ function Get-SPDiagnosticsWebAppAuthSettingsFinding
     }
     
     
-    $finding = New-SPDiagnosticFinding -Name "Web application authentication providers" -Severity Default -InputObject $webAppAuthSettings -Format Table
+    $finding = New-DiagnosticFinding -Name "Web application authentication providers" -Severity Default -InputObject $webAppAuthSettings -Format Table
     if($noWindowsInDefaultZone)
     {
         $finding.Severity = [SPDiagnostics.Severity]::Warning
@@ -1587,7 +1721,7 @@ function Get-SPDiagnosticsSPSecurityTokenServiceConfigFinding
     Param()
     
     $stsConfig = Get-SPSecurityTokenServiceConfig
-    $finding = New-SPDiagnosticFinding -Name "Security token service config" -ReferenceLink "https://joshroark.com/sharepoint-users-forced-to-re-authenticate-unexpectedly/" -InputObject $stsConfig -Format List
+    $finding = New-DiagnosticFinding -Name "Security token service config" -ReferenceLink "https://joshroark.com/sharepoint-users-forced-to-re-authenticate-unexpectedly/" -InputObject $stsConfig -Format List
 
     #Check the size of the MaxLogonTokenCacheItems if trusted issuers are present
     $maxLogonTokenCacheItemsThreshold = 2000
@@ -1617,7 +1751,7 @@ function Get-SPDiagnosticFindingCertInfo
     $stsURL = "https://learn.microsoft.com/en-us/sharepoint/administration/replace-the-sts-certificate"
     $tipURL = "https://joshroark.com/sharepoint-quick-troubleshooting-tip-check-saml-token-signing-certificate/"
     $Certinfo = $cert | select-object Subject, Thumbprint, NotBefore, NotAfter
-    $certfinding = New-SPDiagnosticFinding -Name "$sname Certificate Information" -InputObject $Certinfo -Format Table
+    $certfinding = New-DiagnosticFinding -Name "$sname Certificate Information" -InputObject $Certinfo -Format Table
     $CertLifeTime =  $Certinfo.NotAfter  - (get-date)
     If($CertLifeTime.days -le 180 -and $CertLifeTime.days -gt 0)
     {
@@ -1644,13 +1778,13 @@ function Get-SPDiagnosticsSPTrustedIdentityTokenIssuerFinding
     [cmdletbinding()]
     Param()
 
-    $TrustedIssuerFindings = New-SPDiagnosticFindingCollection
+    $TrustedIssuerFindings = New-DiagnosticFindingCollection
     $trustedIdentityTokenIssuers = Get-SPTrustedIdentityTokenIssuer
     foreach($tokenIssuer in $trustedIdentityTokenIssuers)
     {
-        $finding = New-SPDiagnosticFinding -Name ("Trusted Identity Provider: {0}" -f $tokenIssuer.Name) -Severity Default -InputObject $tokenIssuer -Format List
+        $finding = New-DiagnosticFinding -Name ("Trusted Identity Provider: {0}" -f $tokenIssuer.Name) -Severity Default -InputObject $tokenIssuer -Format List
         $claimTypes = $tokenIssuer.ClaimTypeInformation | Select-Object DisplayName, InputClaimType, MappedClaimType, IsIdentityClaim
-        $claimMappings = New-SPDiagnosticFinding -Name "Claim mappings" -InputObject $claimTypes -Format Table
+        $claimMappings = New-DiagnosticFinding -Name "Claim mappings" -InputObject $claimTypes -Format Table
         $cert = $tokenIssuer.SigningCertificate
         $finding.ChildFindings.Add($claimMappings)
         $finding.ChildFindings.Add((Get-SPDiagnosticFindingCertInfo $cert ($tokenIssuer.name) "TIP"))
@@ -1670,10 +1804,10 @@ function Get-SPDiagnosticsSPTrustedSecurityTokenIssuerFinding
     $trustedSecurityTokenIssuers = Get-SPTrustedSecurityTokenIssuer
     if($trustedSecurityTokenIssuers.Count -ge 1)
     {
-        $Findings = New-SPDiagnosticFinding -Name "Trusted Security Token Issuers" -InputObject $null -Format Table
+        $Findings = New-DiagnosticFinding -Name "Trusted Security Token Issuers" -InputObject $null -Format Table
         foreach($tokenIssuer in $trustedSecurityTokenIssuers)
         {
-            $tokenIssuerFinding = New-SPDiagnosticFinding -Name $tokenIssuer.Name -InputObject $tokenIssuer -Format List
+            $tokenIssuerFinding = New-DiagnosticFinding -Name $tokenIssuer.Name -InputObject $tokenIssuer -Format List
             $Findings.ChildFindings.Add($tokenIssuerFinding)
         }
         return $Findings
@@ -1691,7 +1825,7 @@ function  Get-SPDiagnosticsSPClaimProviderFinding
     Param()
 
     $claimProviders = Get-SPClaimProvider | Select-Object DisplayName, IsEnabled, IsUsedByDefault, IsVisible, AssemblyName
-    $finding = New-SPDiagnosticFinding -Name "Claim providers" -InputObject $claimProviders -Format Table
+    $finding = New-DiagnosticFinding -Name "Claim providers" -InputObject $claimProviders -Format Table
     return $finding
 }
 
@@ -1705,7 +1839,7 @@ function Get-SPDiagnosticSearchFindings
 
     $SSAs = Get-SPEnterpriseSearchServiceApplication  | Sort-Object Name 
 
-    $searchFindings = New-SPDiagnosticFinding -Name "Search Information" -Severity Default -InputObject $null
+    $searchFindings = New-DiagnosticFinding -Name "Search Information" -Severity Default -InputObject $null
     if($null -eq $SSAs -or $SSAs.Count -eq 0)
     {
         $searchFindings.Description+="There are no SSA's in this farm"
@@ -1722,7 +1856,7 @@ function Get-SPDiagnosticSearchFindings
         $crawlAccount = (New-Object Microsoft.Office.Server.Search.Administration.Content $ssa).DefaultGatheringAccount
         #$ssaName = "SSA " + $ssaCount + ":  " + "<span style='color:#0072c6'>'" + $ssa.Name +"'</span>" + " || <span style='color:gray'>CrawlAccount: " + $crawlAccount + "</span>"
         $ssaName = "SSA " + $ssaCount + ":  " + $ssa.Name + " || CrawlAccount: " + $crawlAccount
-        $ssaFindings = New-SPDiagnosticFinding -Name $ssaName -Severity Default -InputObject $null   # this could be moved into the Get-SPDiagnosticsSSAObject func
+        $ssaFindings = New-DiagnosticFinding -Name $ssaName -Severity Default -InputObject $null   # this could be moved into the Get-SPDiagnosticsSSAObject func
         #$ssaFindings.Description+=("CrawlAccount: " + $crawlAccount)
         if($ssa.NeedsUpgradeIncludeChildren -eq $true -or $ssa.NeedsUpgrade -eq $true)
         {
@@ -1774,7 +1908,7 @@ function Get-SPDiagnosticsSSAObject
         $searchApplication
     )
 
-    $findings = New-SPDiagnosticFinding -Name "SSA Object Info" -InputObject $searchApplication -format list
+    $findings = New-DiagnosticFinding -Name "SSA Object Info" -InputObject $searchApplication -format list
 
     return $findings
 }
@@ -1788,7 +1922,7 @@ function Get-SPDiagnosticsSSAProxyPartition
         $searchApplication
     )
 
-    $finding = New-SPDiagnosticFinding -Name "SSA Partition Info" -InputObject $null -format list
+    $finding = New-DiagnosticFinding -Name "SSA Partition Info" -InputObject $null -format list
     
     $proxyAppGuid = $searchapplication.id -replace "-", "" 
     $ssaProxy = Get-SPEnterpriseSearchServiceApplicationProxy | Where-Object{$_.ServiceEndpointuri -like ("*$proxyAppGuid*")}
@@ -1840,11 +1974,11 @@ function Get-SPDiagnosticsSSATimerJobs
         [Object]
         $searchApplication
     )
-    $build = GetSPVersion $buildPrefix
+    $build = Get-SPVersion
     $ssaJobNames = "Application " + $searchApplication.Id
     $ssaDispName = $searchApplication.DisplayName
     $ssaJobs = Get-SPTimerJob | Where-Object{$_.Name -match $ssaJobNames} | Select-Object DisplayName, Id, Status, LastRunTime, Schedule
-    $finding = New-SPDiagnosticFinding -Name "SSA Related Timer Jobs" -InputObject $ssaJobs -format Table
+    $finding = New-DiagnosticFinding -Name "SSA Related Timer Jobs" -InputObject $ssaJobs -format Table
     if(($build -eq "SPSE" -or $build -eq "2019") -and $ssaJobs.Count -lt 9)
     {
         $finding.Severity = [SPDiagnostics.Severity]::Warning
@@ -1880,7 +2014,7 @@ function Get-SPDiagnosticsSSATLegacyAdmin
     )
 
     $LAC = $searchApplication.AdminComponent
-    $finding = New-SPDiagnosticFinding -Name "Admin Component Info" -InputObject $null -format list
+    $finding = New-DiagnosticFinding -Name "Admin Component Info" -InputObject $null -format list
     if($null -eq $searchApplication.SystemManagerLocations)
     {
         $finding.Severity = [SPDiagnostics.Severity]::Critical
@@ -1916,7 +2050,7 @@ function Get-SPDiagnosticsSSACDProp
         [Object]
         $searchApplication
     )
-    $finding = New-SPDiagnosticFinding -Name "Content Distributor Property" -InputObject $null -format list
+    $finding = New-DiagnosticFinding -Name "Content Distributor Property" -InputObject $null -format list
     $conn = New-Object System.Data.SqlClient.SqlConnection
     $cmd = New-Object System.Data.SqlClient.SqlCommand
     
@@ -1970,7 +2104,7 @@ function Get-SPDiagnosticsSSATopology
     $activeTopo = $searchApplication | Get-SPEnterpriseSearchTopology -Active
     $sComponents = Get-SPEnterpriseSearchComponent -SearchTopology $activeTopo | Select-Object ServerName, Name, ServerId, ComponentId, RootDirectory, IndexPartitionOrdinal | Sort-Object Name
     $activeTopoName = "Active Topology ID:  " + $activeTopo.TopologyId
-    $finding = New-SPDiagnosticFinding -Name $activeTopoName -InputObject $sComponents -format table
+    $finding = New-DiagnosticFinding -Name $activeTopoName -InputObject $sComponents -format table
     return $finding
 }
 
@@ -1982,7 +2116,7 @@ function Get-SPDiagnosticsSSADatabases
         [Object]
         $searchApplication
     ) 
-    $searchDbFinding = New-SPDiagnosticFinding -Name "Search Databases" -InputObject $null -format List
+    $searchDbFinding = New-DiagnosticFinding -Name "Search Databases" -InputObject $null -format List
     $ssaAdminDb = $searchApplication.SearchAdminDatabase.Name
     $crawlStores = [array]$searchApplication.CrawlStores
     $linkStores = [array]$searchApplication.LinksStores
@@ -2046,14 +2180,14 @@ function Get-SPDiagnosticsSSAContentSources
         $searchApplication
     )
     $csFindingName = "Content Sources"
-    $findingCollection = New-SPDiagnosticFinding -name $csFindingName -InputObject $null -Format table
+    $findingCollection = New-DiagnosticFinding -name $csFindingName -InputObject $null -Format table
     $contentSources = Get-SPEnterpriseSearchCrawlContentSource -SearchApplication $searchapplication;
     foreach ($contentSrc in $contentSources)
     {
         
         $csName =  'Content Source: ' + $contentSrc.Name + ' || ' + '( ' + 'ID: ' + $contentSrc.ID + ' | ' + ' Type: ' + $contentSrc.Type + ' | ' + ' Behavior: ' + $contentSrc.SharePointCrawlBehavior + ')'
         $csObj = $contentSrc | Select-Object CrawlState, CrawlStatus, ContinuousCrawlStatus, CrawlPriority, SuccessCount, WarningCount, ErrorCount, DeleteCount, CrawlStarted, CrawlCompleted, EnableContinuousCrawls, LevelImportantTotalCount, LevelHighErrorCount, LevelHighRecurringErrorCount, LevelHighTotalCount, LevelImportantRecurringErrorCount, RefreshCrawls 
-        $csFinding = New-SPDiagnosticFinding -name $csName -InputObject $csObj -Format List
+        $csFinding = New-DiagnosticFinding -name $csName -InputObject $csObj -Format List
 
         $retObj = @()
 
@@ -2183,17 +2317,25 @@ function Get-SPDiagnosticsSSAContentSources
            $retObj += $sAddressColl
            #$retObj | Add-Member -MemberType NoteProperty -Name "Type" -Value $contentSrc.Type
            #$sAddress = '<span style="color:gray; font-size:14px">StartAddress ' + $count + "</span>"
-           #$startAddressFinding = New-SPDiagnosticFinding -name $sAddress -InputObject $retObj -Format Table -Expand
+           #$startAddressFinding = New-DiagnosticFinding -name $sAddress -InputObject $retObj -Format Table -Expand
            #$csFinding.ChildFindings.Add($startAddressFinding)
           }
-        $startAddressFinding = New-SPDiagnosticFinding -name "Start Addresses" -InputObject $retObj -Format Table -Expand
+        $startAddressFinding = New-DiagnosticFinding -name "Start Addresses" -InputObject $retObj -Format Table -Expand
         $csFinding.ChildFindings.Add($startAddressFinding)
         $findingCollection.ChildFindings.Add($csFinding)
 
         $csCrawlScheduleColl = [PSCustomObject]@{}
         $csCrawlScheduleColl  | Add-Member -MemberType NoteProperty -Name "Full Crawl Schedule" -Value $contentSrc.FullCrawlSchedule.Description
         $csCrawlScheduleColl  | Add-Member -MemberType NoteProperty -Name "Incremental Crawl Schedule" -Value $contentSrc.IncrementalCrawlSchedule.Description
-        $csSchedFinding = New-SPDiagnosticFinding -name "Crawl Schedule" -InputObject $csCrawlScheduleColl -Format List
+        $csSchedFinding = New-DiagnosticFinding -name "Crawl Schedule | $($contentSrc.Name)" -InputObject $csCrawlScheduleColl -Format List
+        if(!$contentSrc.EnableContinuousCrawls -and [string]::IsNullOrEmpty($contentSrc.FullCrawlSchedule.Description) -and [string]::IsNullOrEmpty($contentSrc.IncrementalCrawlSchedule.Description))
+        {
+            ##No crawls are enabled, make a finding severit
+            $csSchedFinding.Severity = "Informational"
+            $csSchedFinding.Description += "No crawl schedules found for this content source, without a valid crawl schedule content will not be indexed"
+            $csSchedFinding.ReferenceLink += [uri]"https://learn.microsoft.com/en-us/sharepoint/search/add-edit-or-delete-a-content-source"
+        }
+
         $csFinding.ChildFindings.Add($csSchedFinding)
       }
       return $findingCollection
@@ -2210,11 +2352,11 @@ function Get-SPDiagnosticsSSAServerNameMappings
     $SNM = $searchApplication | Get-SPEnterpriseSearchCrawlMapping
     if($null -ne $snm)
     {
-        $finding = New-SPDiagnosticFinding -Name "Server Name Mappings" -InputObject $SNM -format table
+        $finding = New-DiagnosticFinding -Name "Server Name Mappings" -InputObject $SNM -format table
     }
     else
     {
-        $finding = New-SPDiagnosticFinding -Name "Server Name Mappings" -InputObject $null -Description "This SSA has no Server Name Mappings" -format list
+        $finding = New-DiagnosticFinding -Name "Server Name Mappings" -InputObject $null -Description "This SSA has no Server Name Mappings" -format list
     }
     return $finding
 }
@@ -2230,11 +2372,11 @@ function Get-SPDiagnosticsSSACrawlRules
         $crawlrules = $searchApplication | Get-SPEnterpriseSearchCrawlRule | Select-Object * -ExcludeProperty Parent
         if($null -ne $crawlrules)
         {
-            $finding = New-SPDiagnosticFinding -Name "Crawl Rules" -InputObject $crawlrules -format table
+            $finding = New-DiagnosticFinding -Name "Crawl Rules" -InputObject $crawlrules -format table
         }
         else
         {
-            $finding = New-SPDiagnosticFinding -Name "Crawl Rules" -Description "This SSA has no Crawl Rules defined" -format list -InputObject $null
+            $finding = New-DiagnosticFinding -Name "Crawl Rules" -Description "This SSA has no Crawl Rules defined" -format list -InputObject $null
         }
     return $finding
 }
@@ -2272,7 +2414,7 @@ function Get-SPDiagnosticsSSACrawlPolicies
     $CrawlPolicyColl | Add-Member RefreshDemoteLimitStart $searchApplication.GetProperty("RefreshDemoteLimitStart")
     $CrawlPolicyColl | Add-Member RefreshDemoteLimitEnd $searchApplication.GetProperty("RefreshDemoteLimitEnd")
     
-    $crawlPolicyFinding = New-SPDiagnosticFinding -Name "SSA Crawl Policies" -InputObject $CrawlPolicyColl -Format List
+    $crawlPolicyFinding = New-DiagnosticFinding -Name "SSA Crawl Policies" -InputObject $CrawlPolicyColl -Format List
  
     return $crawlPolicyFinding
 }
@@ -2297,7 +2439,7 @@ function Get-SPDiagnosticsSSASearchService
    InternetIdentity = $searchInstance.InternetIdentity
    Status = $searchInstance.Status
 }
-    $finding = New-SPDiagnosticFinding -Name "'Farm Search' Service Instance" -InputObject $siObj -format List
+    $finding = New-DiagnosticFinding -Name "'Farm Search' Service Instance" -InputObject $siObj -format List
     
     $ssaWebProxy = $searchInstance.WebProxy
     if($null -ne $ssaWebProxy.Address)
@@ -2357,7 +2499,7 @@ function Get-SPDiagnosticsSSASearchInstances
             }
         }
     }
-    $ssiFinding = New-SPDiagnosticFinding -Name "'Search\HostController Service' Instances" -InputObject $problemSearchInstanceColl -Format Table
+    $ssiFinding = New-DiagnosticFinding -Name "'Search\HostController Service' Instances" -InputObject $problemSearchInstanceColl -Format Table
 
     if($problemSearchInstanceColl.Count -gt 0)
     {
@@ -2419,7 +2561,7 @@ function Get-SPDiagnosticsSSPJobInstances
             }
         }
     }
-    $sspJobFinding = New-SPDiagnosticFinding -Name "'SSP Job Control' Service Instances" -InputObject $problemSspJobInstanceColl -Format Table
+    $sspJobFinding = New-DiagnosticFinding -Name "'SSP Job Control' Service Instances" -InputObject $problemSspJobInstanceColl -Format Table
     if($problemSspJobInstanceColl.Count -gt 0)
     {
 
@@ -2446,7 +2588,7 @@ function Get-SPDiagnosticsSSAEndpoints
         [Object]
         $searchApplication
     )
-    $finding = New-SPDiagnosticFinding -Name "SSA Endpoints" -InputObject $null -format list
+    $finding = New-DiagnosticFinding -Name "SSA Endpoints" -InputObject $null -format list
     
     try
     {
@@ -2761,12 +2903,12 @@ function Get-SPDiagnosticsSearchHealthCheck()
     # ------------------------------------------------------------------------------------------------------------------
     Function AnalyticsStatus
     {
-        $AnalyticsStatusFindings = New-SPDiagnosticFinding -Name "Analytics Processing Job Status" -Severity Default -InputObject $null
+        $AnalyticsStatusFindings = New-DiagnosticFinding -Name "Analytics Processing Job Status" -Severity Default -InputObject $null
         $analyticsStatus = Get-SPEnterpriseSearchStatus -SearchApplication $global:ssa -JobStatus | Where-Object{$_.Name -ne "Not Available"}
 
         foreach ($analyticsEntry in $analyticsStatus)
         {
-            $AnalyticsEntryFindings = New-SPDiagnosticFinding -Name $analyticsEntry.Name -Severity Default -InputObject $null -Format List
+            $AnalyticsEntryFindings = New-DiagnosticFinding -Name $analyticsEntry.Name -Severity Default -InputObject $null -Format List
 
             $retObj = [PSCustomObject]@{
                 Name = $analyticsEntry.Name
@@ -2799,8 +2941,8 @@ function Get-SPDiagnosticsSearchHealthCheck()
                         $daysSinceLastSuccess = $dNow.DayOfYear - $dLast.DayOfYear
                         if ($daysSinceLastSuccess -gt 3)
                         {
-                            $AnalyticsEntry.Severity = [SPDiagnostics.Severity]::Warning
-                            $analyticsEntry.WarningMessage += "Warning: More than three days since last successful run"
+                            $AnalyticsEntryFindings.Severity = [SPDiagnostics.Severity]::Warning
+                            $AnalyticsEntryFindings.WarningMessage += "Warning: More than three days since last successful run"
                             $global:serviceDegraded = $true                        
                         }
                     }
@@ -2819,7 +2961,7 @@ function Get-SPDiagnosticsSearchHealthCheck()
     # ------------------------------------------------------------------------------------------------------------------
     Function SearchComponentStatus($component)
     {
-        #$SearchComponentStatusDiagnosticsFinding = New-SPDiagnosticFinding -Name "Search Component Status" -Severity Default -InputObject $null -format List
+        #$SearchComponentStatusDiagnosticsFinding = New-DiagnosticFinding -Name "Search Component Status" -Severity Default -InputObject $null -format List
 
         # Find host name
         foreach($searchComp in ($global:topologyCompList))
@@ -3021,7 +3163,7 @@ function Get-SPDiagnosticsSearchHealthCheck()
         $indexerInfo = @()
         $generationInfo = @()
         $generation = 0
-        $DetailedIndexerDiagFinding = New-SPDiagnosticFinding -Name "Detailed Component Diag" -Severity Default -InputObject $null -format List
+        $DetailedIndexerDiagFinding = New-DiagnosticFinding -Name "Detailed Component Diag" -Severity Default -InputObject $null -format List
 
         foreach ($searchComp in ($global:componentStateList))
         {
@@ -3126,7 +3268,7 @@ function Get-SPDiagnosticsSearchHealthCheck()
     # ------------------------------------------------------------------------------------------------------------------
     Function VerifyHaLimits
     {
-        $VerifyHaLimitsDiagnosticFinding = New-SPDiagnosticFinding -Name "Verified HA Limits" -Description "Verifying HA status for topology and index size limits" -Severity Default -InputObject $null -format List 
+        $VerifyHaLimitsDiagnosticFinding = New-DiagnosticFinding -Name "Verified HA Limits" -Description "Verifying HA status for topology and index size limits" -Severity Default -InputObject $null -format List 
 		
         $hacl = [PSCustomObject]@{
         }
@@ -3137,7 +3279,7 @@ function Get-SPDiagnosticsSearchHealthCheck()
         }
         $docsExceeded = $false
         $docsHigh = $false
-        $build = GetSPVersion $buildPrefix
+        $build = Get-SPVersion
         if($build -eq "2013")  
         {
             $is2016 = $false
@@ -3231,14 +3373,14 @@ function Get-SPDiagnosticsSearchHealthCheck()
         if ($docsExceeded)
         {
             $global:serviceDegraded = $true
-            $docsExceededFindings = New-SPDiagnosticFinding -Name "Docs 'per Index Partition' Exceeded" -Severity Warning -InputObject $null -format List -WarningMessage "One or more index component exceeds the supported document limit"
+            $docsExceededFindings = New-DiagnosticFinding -Name "Docs 'per Index Partition' Exceeded" -Severity Warning -InputObject $null -format List -WarningMessage "One or more index component exceeds the supported document limit"
             #$docsExceededFindings.WarningMessage += "Warning: One or more index component exceeds document limit"
             $docsExceededFindings.InputObject = $ixcel
             $VerifyHaLimitsDiagnosticFinding.ChildFindings.Add($docsExceededFindings)
         }
         if ($docsHigh)
         {
-            $docsHighFindings = New-SPDiagnosticFinding -Name "Docs 'per Index Partition' Close To Limit" -Severity Warning -InputObject $null -format List -WarningMessage "Warning: One or more index component is close to the supported document limit"
+            $docsHighFindings = New-DiagnosticFinding -Name "Docs 'per Index Partition' Close To Limit" -Severity Warning -InputObject $null -format List -WarningMessage "Warning: One or more index component is close to the supported document limit"
             #$docsHighFindings.WarningMessage += "Warning: One or more index component is close to document limit"
             $docsHighFindings.InputObject = $ixcwl
             $VerifyHaLimitsDiagnosticFinding.ChildFindings.Add($docsHighFindings)
@@ -3256,7 +3398,7 @@ function Get-SPDiagnosticsSearchHealthCheck()
     # ------------------------------------------------------------------------------------------------------------------
     Function VerifyHostControllerRepository
     {
-        $VerifyHostControllerRepositoryFinding =  New-SPDiagnosticFinding -Name "Host Controller Repository" -Severity Default -InputObject $null -format Table
+        $VerifyHostControllerRepositoryFinding =  New-DiagnosticFinding -Name "Host Controller Repository" -Severity Default -InputObject $null -format Table
 
         $retObj = [PSCustomObject]@{
         }
@@ -3298,7 +3440,7 @@ function Get-SPDiagnosticsSearchHealthCheck()
                 $VerifyHostControllerRepositoryFinding.WarningMessage += "Warning: Primary host controller is not available"
                 $VerifyHostControllerRepositoryFinding.WarningMessage += "Recommended action: Restart server or set new primary host controller using Set-SPEnterpriseSearchPrimaryHostController"
 
-                $hcstatfindings =  New-SPDiagnosticFinding -Name "Repository version for existing host controllers" -Severity Default -InputObject $hcstatfindings -format table
+                $hcstatfindings =  New-DiagnosticFinding -Name "Repository version for existing host controllers" -Severity Default -InputObject $hcstatfindings -format table
                 $VerifyHostControllerRepositoryFinding.ChildFindings.Add($hcstatfindings)
 
             }
@@ -3311,7 +3453,7 @@ function Get-SPDiagnosticsSearchHealthCheck()
                 $VerifyHostControllerRepositoryFinding.WarningMessage += "Latest repository version: $highestRepVer "
                 $VerifyHostControllerRepositoryFinding.WarningMessage += "Recommended action: Set new primary host controller using Set-SPEnterpriseSearchPrimaryHostController"
 
-                $hcstatfindings =  New-SPDiagnosticFinding -Name "Repository version for existing host controllers" -Severity Default -InputObject $hcstatfindings -format table
+                $hcstatfindings =  New-DiagnosticFinding -Name "Repository version for existing host controllers" -Severity Default -InputObject $hcstatfindings -format table
                 $VerifyHostControllerRepositoryFinding.ChildFindings.Add($hcstatfindings)
             }
             return $VerifyHostControllerRepositoryFinding            
@@ -3326,11 +3468,11 @@ function Get-SPDiagnosticsSearchHealthCheck()
     function VerifyRunningProcesses
     {
         $components = $global:ssa.ActiveTopology.GetComponents() | SORT-OBJECT ServerName | select-object ServerName, Name
-        $VerifyRunningProcessesDiagnosticsFindings = New-SPDiagnosticFinding -Name "VerifyRunningProcesses" -Severity Default -format List
+        $VerifyRunningProcessesDiagnosticsFindings = New-DiagnosticFinding -Name "VerifyRunningProcesses" -Severity Default -format List
 
         foreach ($hostname in $global:hostArray.Hostname) 
         {
-            $RunningProcessDiagnosticFinding = New-SPDiagnosticFinding -Name $hostname -Severity Default -Format List
+            $RunningProcessDiagnosticFinding = New-DiagnosticFinding -Name $hostname -Severity Default -Format List
 
             $retObj = [PSCustomObject]@{
                 HostName = $hostname
@@ -3396,17 +3538,17 @@ function Get-SPDiagnosticsSearchHealthCheck()
             $services = Get-Service -ComputerName $hostname -Name SPTimerV4, SPAdminV4, OSearch15, SPSearchHostController 
             $running = $services | where-object {$_.Status -eq "Running"}
             if ($running) {
-                $serviceinstances = New-SPDiagnosticFinding -Name "Running Service Instances" -Severity Default -format List -InputObject $running
+                $serviceinstances = New-DiagnosticFinding -Name "Running Service Instances" -Severity Default -format List -InputObject $running
                 $RunningProcessDiagnosticFinding.ChildFindings.Add($serviceinstances)
             }
             $stopped = $services | where-object {$_.Status -eq "Stopped"}
             if ($stopped) {
-                $serviceinstances = New-SPDiagnosticFinding -Name "Stopped Service Instances" -Severity Default -format List -InputObject $stopped
+                $serviceinstances = New-DiagnosticFinding -Name "Stopped Service Instances" -Severity Default -format List -InputObject $stopped
                 $RunningProcessDiagnosticFinding.ChildFindings.Add($serviceinstances)
             }
             $other   = $services | where-object {($_.Status -ne "Running") -and ($_.Status -ne "Stopped")}
             if ($other) {
-                $serviceinstances = New-SPDiagnosticFinding -Name "Service in an abnormal or transient state...s" -Severity Warning -format List -InputObject $other
+                $serviceinstances = New-DiagnosticFinding -Name "Service in an abnormal or transient state...s" -Severity Warning -format List -InputObject $other
                 $RunningProcessDiagnosticFinding.ChildFindings.Add($serviceinstances)
             }
             $RunningProcessDiagnosticFinding.InputObject = $retObj
@@ -3416,7 +3558,7 @@ function Get-SPDiagnosticsSearchHealthCheck()
     }
 
     $healthCheckName = "Search Healthcheck " + "( " + $ssa.DisplayName + " )"
-    $SearchTopologyHealthCheck = New-SPDiagnosticFinding -Name $healthCheckName -Severity Default -InputObject $null -Format List
+    $SearchTopologyHealthCheck = New-DiagnosticFinding -Name $healthCheckName -Severity Default -InputObject $null -Format List
 
     # ------------------------------------------------------------------------------------------------------------------
     # Global variables:
@@ -3516,7 +3658,7 @@ function Get-SPDiagnosticsSearchHealthCheck()
     }
     if($compStatusColl)
     {
-        #$SearchComponentStatusDiagnosticsFinding = New-SPDiagnosticFinding -Name "Broken Search Components" -Severity Default -InputObject $compStatusColl -format Table
+        #$SearchComponentStatusDiagnosticsFinding = New-DiagnosticFinding -Name "Broken Search Components" -Severity Default -InputObject $compStatusColl -format Table
         #$SearchComponentStatusDiagnosticsFinding.Severity = [SPDiagnostics.Severity]::Warning
         #$SearchTopologyHealthCheck.ChildFindings.Add($SearchComponentStatusDiagnosticsFinding)
     }
@@ -3531,7 +3673,7 @@ function Get-SPDiagnosticsSearchHealthCheck()
     if ($global:compArray)
     {
         $global:compArray = $global:compArray | Sort-Object -Property Component
-        $ComponentFindings = New-SPDiagnosticFinding -Name "Search Topology" -Severity Default -InputObject $global:compArray  -Format Table
+        $ComponentFindings = New-DiagnosticFinding -Name "Search Topology" -Severity Default -InputObject $global:compArray  -Format Table
         $SearchTopologyHealthCheck.ChildFindings.Add($ComponentFindings)
     }
 
@@ -3563,12 +3705,12 @@ function Get-SPDiagnosticsSearchHealthCheck()
         }
         if ($componentsByServer)
         {
-            $MultiComponentServers = New-SPDiagnosticFinding -Name "Servers with multiple search components" -Severity Default -InputObject $null
+            $MultiComponentServers = New-DiagnosticFinding -Name "Servers with multiple search components" -Severity Default -InputObject $null
             foreach ($hostInfo in $global:hostArray)
             {
                 if ([int] $hostInfo.components -gt 1)
                 {
-                    $hostinfofindings = New-SPDiagnosticFinding -Name $hostinfo.hostName -Severity Default -InputObject $hostInfo -Format Table 
+                    $hostinfofindings = New-DiagnosticFinding -Name $hostinfo.hostName -Severity Default -InputObject $hostInfo -Format Table 
                     $MultiComponentServers.ChildFindings.Add($hostinfofindings)
                 }
                                 
@@ -3596,7 +3738,7 @@ function Get-SPDiagnosticsSearchHealthCheck()
         
     if ($global:unknownComponents)
     {
-        $UnknownComponents = New-SPDiagnosticFinding -Name "The following components are not reachable" -InputObject $null 
+        $UnknownComponents = New-DiagnosticFinding -Name "The following components are not reachable" -InputObject $null 
         $UnknownComponents.Severity = [SPDiagnostics.Severity]::Warning
         $UnknownComponents.WarningMessage = "Recommended action: Restart Host Controller process or restart the associated server(s) and review ULS logs during that period"
 
@@ -3613,7 +3755,7 @@ function Get-SPDiagnosticsSearchHealthCheck()
 
     if ($global:degradedComponents)
     {
-        $DegradedComponents = New-SPDiagnosticFinding -Name "The following components are degraded" -Severity Warning -InputObject $null
+        $DegradedComponents = New-DiagnosticFinding -Name "The following components are degraded" -Severity Warning -InputObject $null
         $DegradedComponents.Severity = [SPDiagnostics.Severity]::Warning
         $DegradedComponents.WarningMessage = "Recommended action for degraded components:</br>"
         $DegradedComponents.WarningMessage+= "    Component registering or resolving:</br>"
@@ -3646,7 +3788,7 @@ function Get-SPDiagnosticsSearchHealthCheck()
 
     if ($global:failedComponents)
     {
-        $FailedComponentsDiagnosticFindings = New-SPDiagnosticFinding -Name "The following components are reported in error" -Severity Warning -InputObject $null -format List -WarningMessage "Recommended action: Restart the associated server(s)"
+        $FailedComponentsDiagnosticFindings = New-DiagnosticFinding -Name "The following components are reported in error" -Severity Warning -InputObject $null -format List -WarningMessage "Recommended action: Restart the associated server(s)"
         $description = $null
 
         foreach($fc in $failedComponents)
@@ -3722,52 +3864,13 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
     {
         $Script:CheckServiceACLs = $true
     }
-    
-    function GetSPVersion($buildPrefix)
-    {
-        $farm = [Microsoft.SharePoint.Administration.SPFarm]::Local
-        If($farm.BuildVersion.Major -eq 16 -or $farm.BuildVersion.Major -eq 15)
-        {
-            if($farm.BuildVersion.Major -eq 16)
-            {
-                if($farm.BuildVersion.Build -ge 14326)
-                {
-                    $buildFoo = "SPSE"
-                }
-                elseif($farm.BuildVersion.Build -ge 10337 -and $farm.BuildVersion.Build -lt 14320)
-                {
-                    $buildFoo = "2019"
-                }
-                else
-                {
-                    $buildFoo = "2016"
-                }
-            }
-            else
-            {
-                $buildFoo = "2013"
-            }
-    
-        }
-        elseIf($farm.BuildVersion.Major -eq 14)
-        {
-            Write-Warning "The support for SharePoint 2010 has ended, please update this farm to a newer version of SharePoint.. Aborting Script"
-            exit
-        }
-        else
-        {
-            Write-Warning "Unsupported Version of SP... Aborting script"
-            exit
-        }
-        return $buildFoo
-    }
         
     function Get-SPAnalyticsTopologyDiagnosticFinding($ssa)
     {
         $AnalyticsTopology = $null 
 
         # On 2013 Servers there is no AnalytisTopology accessor. Try getting it the old fashioned way if it's null
-        $spVersion = GetSPVersion
+        $spVersion = Get-SPVersion
 
         if(($spVersion) -eq "2013" -or $spVersion -eq "2016")
         {
@@ -3778,14 +3881,14 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
             $AnalyticsTopology = $ssa.AnalyticsTopology
         }
     
-        $finding = New-SPDiagnosticFinding -Name "Analytics Topology" -Severity Default -Format List -InputObject $AnalyticsTopology
+        $finding = New-DiagnosticFinding -Name "Analytics Topology" -Severity Default -Format List -InputObject $AnalyticsTopology
         
         if($null -ne $AnalyticsTopology)
         {
             $components = $AnalyticsTopology.GetComponents()
             foreach($component in $components)
             {
-                $componentFinding = New-SPDiagnosticFinding -Name $component.Name -Severity Default -Format List -InputObject $component
+                $componentFinding = New-DiagnosticFinding -Name $component.Name -Severity Default -Format List -InputObject $component
                 $finding.ChildFindings.Add($componentFinding)
             }
         }
@@ -3805,7 +3908,7 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
         $tempSite = $site | select-object Url, CompatibilityLevel
         $tempSite | Add-Member -MemberType NoteProperty -Name "SPReportingFeatureEnabled" -Value $SPReportingFeatureEnabled
         
-        $finding = New-SPDiagnosticFinding -Name "Site and WebRoot Properties" -Severity Default -InputObject $tempSite -Format Table
+        $finding = New-DiagnosticFinding -Name "Site and WebRoot Properties" -Severity Default -InputObject $tempSite -Format Table
         
         if(!$SPReportingFeatureEnabled)
         {
@@ -3817,7 +3920,7 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
         $finding.ChildFindings.Add((Get-SPDiagnosticWebApplicationPropertiesOfInterest $site.WebApplication))
         
         $webs = $site.AllWebs
-        $webFinding =  New-SPDiagnosticFinding -Name "All Webs" -Severity Default -InputObject $null -Format Table -Expand
+        $webFinding =  New-DiagnosticFinding -Name "All Webs" -Severity Default -InputObject $null -Format Table -Expand
     
         foreach($web in $webs)
         {
@@ -3840,7 +3943,7 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
     function Get-SPDiagnosticWebPropertiesOfInterest($web)
     {
         $tempWeb = $web | Select-Object Url, NoCrawl
-        $finding = New-SPDiagnosticFinding -Name "Web Properties" -Severity Default -InputObject $tempWeb -Format Table
+        $finding = New-DiagnosticFinding -Name "Web Properties" -Severity Default -InputObject $tempWeb -Format Table
         if($tempWeb.NoCrawl -eq $true)
         {
             $finding.WarningMessage = 'NoCrawl is $true on this web. This may prevent accurate reporting, site views, etc,.'
@@ -3857,7 +3960,7 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
         $tempWebApp  | Add-Member -MemberType NoteProperty -Name "Application Managed Account" -Value $webApp.ApplicationPool.ManagedAccount
     
         $script:W3WPAppPoolAccount = $webApp.ApplicationPool.Username
-        $finding = New-SPDiagnosticFinding -Name "WebApp Properties" -Severity Default -InputObject $tempWebApp -Format List
+        $finding = New-DiagnosticFinding -Name "WebApp Properties" -Severity Default -InputObject $tempWebApp -Format List
         
         return $finding
     }
@@ -3866,7 +3969,7 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
     {
         $OWSTimerService = Get-WmiObject -Class Win32_Service | where-object{$_.Name -like "SPTimerV4"}
     
-        $finding = New-SPDiagnosticFinding -Name "OWSTimer/SPTimerV4" -Severity Default -Format List
+        $finding = New-DiagnosticFinding -Name "OWSTimer/SPTimerV4" -Severity Default -Format List
     
         if($null -ne $OWSTimerService)
         {
@@ -3885,7 +3988,7 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
     function Get-SPDiagnosticFindingSPUsageManager()
     {
         $SPUsageManager = [Microsoft.SharePoint.Administration.SPUsageManager]::Local
-        $finding = New-SPDiagnosticFinding -Name "SPUsageManager Details" -Severity Default -Format List
+        $finding = New-DiagnosticFinding -Name "SPUsageManager Details" -Severity Default -Format List
     
         if($null -eq $SPUsageManager)
         {
@@ -3909,7 +4012,7 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
     
     function Get-SPUsageServiceDiagnosticFinding()
     {
-        $finding = New-SPDiagnosticFinding -Name "SPUsageService Details" -Severity Default -Format List
+        $finding = New-DiagnosticFinding -Name "SPUsageService Details" -Severity Default -Format List
     
         $SPUsageService = Get-SPUsageService
         if($null -eq $SPUsageService)
@@ -3938,7 +4041,7 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
     
         if($null -ne $instances)
         {
-            $instancesFinding = New-SPDiagnosticFinding -Name "SPUsageService Instances" -Severity Default -Format Table -InputObject $instances
+            $instancesFinding = New-DiagnosticFinding -Name "SPUsageService Instances" -Severity Default -Format Table -InputObject $instances
     
             foreach($instance in $instances)
             {
@@ -3946,7 +4049,7 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
     
                 if($status -ne "Online")
                 {
-                    $instanceFinding = New-SPDiagnosticFinding -Name "SPUsageService Instance" -Severity Default -Format List -InputObject $instance
+                    $instanceFinding = New-DiagnosticFinding -Name "SPUsageService Instance" -Severity Default -Format List -InputObject $instance
                     $server = $instance.Server
                     $instanceFinding.WarningMessage = "The SPUsageService Instance for $server is $status rather than Online. This will prevent job-usage-log-file-import from processing .usage files on this server if it's a WFE"
                     $instancesFinding.ChildFindings.Add($instanceFinding)
@@ -3968,7 +4071,7 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
             $finding.Severity = [SPDiagnostics.Severity]::Critical
         }
         else {
-            $applicationFinding = New-SPDiagnosticFinding -Name "SPUSageApplication Instances" -Severity Default -Format List -InputObject $applications
+            $applicationFinding = New-DiagnosticFinding -Name "SPUSageApplication Instances" -Severity Default -Format List -InputObject $applications
             $finding.ChildFindings.Add($applicationFinding)
         }
     
@@ -3980,7 +4083,7 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
             $Script:UsageLogDir += "\"
         }
     
-        $jobDefinitionsFinding = New-SPDiagnosticFinding -Name "Job Definitions on SPUsageService" -Severity Default -Format Table
+        $jobDefinitionsFinding = New-DiagnosticFinding -Name "Job Definitions on SPUsageService" -Severity Default -Format Table
     
         $jobDefinitionsCount = [PSCustomObject]@{
             "Job Definition Count" = $SPUsageService.JobDefinitions.Count
@@ -3992,8 +4095,8 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
         {
            
             $jobname = $Job.Name
-            $jobDefinitionFinding = New-SPDiagnosticFinding -Name "Job Definitions: $jobname" -Severity Default -Format List -InputObject $job
-            $JobHistoryFindingEntries = New-SPDiagnosticFinding -Name "Most Recent 20 Job History Entries" -Severity Default -Format Table 
+            $jobDefinitionFinding = New-DiagnosticFinding -Name "Job Definitions: $jobname" -Severity Default -Format List -InputObject $job
+            $JobHistoryFindingEntries = New-DiagnosticFinding -Name "Most Recent 20 Job History Entries" -Severity Default -Format Table 
 
             $JobHistoryEntries = $job.HistoryEntries | Sort-Object -Descending StartTime | Select-Object Servername, Status, StartTime, EndTime, ErrorMessage -First 20
             $JobHistoryFindingEntries.InputObject = $JobHistoryEntries
@@ -4025,7 +4128,7 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
     
         $finding.ChildFindings.Add($jobDefinitionsFinding)
     
-        $JobHistoryFindingEntries = New-SPDiagnosticFinding -Name "Most Recent 20 Job History Entries On SPUsageService" -Severity Default -Format Table 
+        $JobHistoryFindingEntries = New-DiagnosticFinding -Name "Most Recent 20 Job History Entries On SPUsageService" -Severity Default -Format Table 
         
         $JobHistoryEntries = $SPUsageService.JobHistoryEntries | Sort-Object -Descending StartTime | Select-Object Servername, Status, StartTime, EndTime, ErrorMessage -First 20
     
@@ -4038,7 +4141,7 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
     
     function Get-SPUsageDefinitionDiagnosticFinding()
     {
-        $finding = New-SPDiagnosticFinding -Name "SPUsageDefinitions" -Severity Default -Format Table
+        $finding = New-DiagnosticFinding -Name "SPUsageDefinitions" -Severity Default -Format Table
         $definitions = Get-SPUsageDefinition
         $finding.InputObject = $definitions | Select-Object Name, Status, Enabled, EnableReceivers, Retention, DaysToKeepData, DaysToKeepUsageFiles, UsageDatabaseEnabled, TableName, MaxTotalSizeInBytes, Hidden, Description
     
@@ -4049,7 +4152,7 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
             if($script:UsageDefinitionsWithReceivers.Contains($definition.Name))
             {
                 $tempName = $definition.Name
-                $definitionFinding = New-SPDiagnosticFinding -Name $tempName -Severity Default -Format List -InputObject $definition
+                $definitionFinding = New-DiagnosticFinding -Name $tempName -Severity Default -Format List -InputObject $definition
 
                 if(!$definition.EnableReceivers)
                 {
@@ -4065,7 +4168,7 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
     
                 foreach($receiver in $definition.Receivers)
                 {
-                    $receiverFinding = New-SPDiagnosticFinding -Name $receiver -Severity Default -Format Table -InputObject $definition
+                    $receiverFinding = New-DiagnosticFinding -Name $receiver -Severity Default -Format Table -InputObject $definition
                     $assembly = $receiver.ReceiverAssembly
                     
                     if($null -ne $assembly)
@@ -4098,8 +4201,7 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
     
     function Get-UsageAndHealthDataCollectionProxyDiagnosticFinding()
     {
-        $finding = New-SPDiagnosticFinding -Name $script:UsageAndHealthDataCollectionProxyName -Severity Default -Format List
-        $finding.ReferenceLink += "https://learn.microsoft.com/en-us/sharepoint/administration/configure-usage-and-health-data-collection"
+        $finding = New-DiagnosticFinding -Name $script:UsageAndHealthDataCollectionProxyName -Severity Default -Format List -ReferenceLink "https://learn.microsoft.com/en-us/sharepoint/administration/configure-usage-and-health-data-collection"
     
         $UHDCP = Get-SPServiceApplicationProxy | where-object {$_.TypeName -eq $script:UsageAndHealthDataCollectionProxyName}
         if($null -ne $UHDCP)
@@ -4128,7 +4230,7 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
     
     function Get-EventTypeDefinitionsDiagnosticFinding()
     {
-        $finding = New-SPDiagnosticFinding -Name "EventType Definitions" -Severity Default -Format Table
+        $finding = New-DiagnosticFinding -Name "EventType Definitions" -Severity Default -Format Table
     
         if($null -eq $script:ssa)
         {
@@ -4147,7 +4249,7 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
             if($event.Enabled -eq $false)
             {
                 $name = $event.EventName
-                $eventFinding = New-SPDiagnosticFinding -Name $name -Severity Default -Format List -InputObject $event
+                $eventFinding = New-DiagnosticFinding -Name $name -Severity Default -Format List -InputObject $event
                 $eventFinding.Severity = [SPDiagnostics.Severity]::Informational
                 $eventFinding.WarningMessage = "$name is not enabled, this will impact reports relying on $name data. This can be safely ignored for some event types"
                 $finding.ChildFindings.Add($eventFinding)
@@ -4159,7 +4261,7 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
     
     Function Get-EventStoreFolderInfoDiagnosticFinding($ssa)
     {
-        $finding = New-SPDiagnosticFinding -Name "Event Store Folder" -Severity Default
+        $finding = New-DiagnosticFinding -Name "Event Store Folder" -Severity Default
     
         if($null -eq $ssa)
         {
@@ -4207,7 +4309,7 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
     
     Function Get-FolderInfoDiagnosticFinding($findingName, $path)
     {
-        $finding = New-SPDiagnosticFinding -Name $findingName -Severity Default -Format List 
+        $finding = New-DiagnosticFinding -Name $findingName -Severity Default -Format List 
     
         $properties = [PSCustomObject]@{
             Path = $path
@@ -4227,7 +4329,7 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
     
         if($null -ne $folderacls)
         {
-            $permissionFinding = New-SPDiagnosticFinding -Name "Permissions for $path" -Severity Default -Format Table 
+            $permissionFinding = New-DiagnosticFinding -Name "Permissions for $path" -Severity Default -Format Table 
            
             if($Script:CheckServiceACLs)
             {
@@ -4252,7 +4354,7 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
     
         if($null -ne $items)
         {
-            $EventStoreContentFinding =  New-SPDiagnosticFinding -Name "$findingName Contents" -Severity Default -Format Table -InputObject $items 
+            $EventStoreContentFinding =  New-DiagnosticFinding -Name "$findingName Contents" -Severity Default -Format Table -InputObject $items 
             $finding.ChildFindings.Add($EventStoreContentFinding)
         }
         else {
@@ -4312,7 +4414,7 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
     
         if($collection.Length -gt 0)
         {
-            $finding = New-SPDiagnosticFinding -Name "Account Membership" -Severity Default -Format Table -InputObject $collection
+            $finding = New-DiagnosticFinding -Name "Account Membership" -Severity Default -Format Table -InputObject $collection
             return $finding
         }
     
@@ -4348,7 +4450,7 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
     
     function Get-UsageAnalyticsInfoDiagnosticFinding
     {
-        $finding = New-SPDiagnosticFinding -Name "Usage Analytics Timerjob Information" -Severity Default -Format List 
+        $finding = New-DiagnosticFinding -Name "Usage Analytics Timerjob Information" -Severity Default -Format List 
     
         if($null -eq $script:ssa)
         {
@@ -4363,7 +4465,7 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
         if($usageJob)
         {
             $finding.InputObject = $usageJob
-            $AnalysisInfoFinding = New-SPDiagnosticFinding -Name "Analysis Information from TimerJob" -Severity Default -Format List -InputObject $usageJob.GetAnalysisInfo()
+            $AnalysisInfoFinding = New-DiagnosticFinding -Name "Analysis Information from TimerJob" -Severity Default -Format List -InputObject $usageJob.GetAnalysisInfo()
             $finding.ChildFindings.Add($AnalysisInfoFinding)
         }
         else
@@ -4377,7 +4479,7 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
     
     function Get-SearchAnalysisEngineInformationDiagnosticFinding
     {
-        $finding = New-SPDiagnosticFinding -Name "AnalyticsJobDefinition Jobs" -Severity Default -Format List 
+        $finding = New-DiagnosticFinding -Name "AnalyticsJobDefinition Jobs" -Severity Default -Format List 
     
         if($null -eq $script:ssa)
         {
@@ -4398,18 +4500,18 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
     
         foreach($job in $jobs)
         {
-            $jobFinding =  New-SPDiagnosticFinding -Name $job.Name -Severity Default -Format List -InputObject $job
+            $jobFinding =  New-DiagnosticFinding -Name $job.Name -Severity Default -Format List -InputObject $job
     
             $analysisjobs = $job.Analyses 
     
             foreach($analysisjob in $analysisjobs)
             {
-                $analysisJobFinding = New-SPDiagnosticFinding -Name $analysisjob.Name -Severity Default -Format List -InputObject $analysisjob
+                $analysisJobFinding = New-DiagnosticFinding -Name $analysisjob.Name -Severity Default -Format List -InputObject $analysisjob
     
                 $analysisInfo = $analysisjob.GetAnalysisInfo()
                 if($analysisInfo)
                 {
-                    $AnalysisInfoFinding = New-SPDiagnosticFinding -Name "Analysis Info" -Severity Default -Format List -InputObject $analysisInfo
+                    $AnalysisInfoFinding = New-DiagnosticFinding -Name "Analysis Info" -Severity Default -Format List -InputObject $analysisInfo
                     $analysisJobFinding.ChildFindings.Add($AnalysisInfoFinding)
                 }
                 else {
@@ -4420,7 +4522,7 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
                 $analysisConfiguration = $analysisjob.GetAnalysisConfiguration()
                 if($analysisConfiguration)
                 {
-                    $AnalysisConfigurationFinding =  New-SPDiagnosticFinding -Name "Analysis Configuration" -Severity Default -Format Table -InputObject $analysisConfiguration
+                    $AnalysisConfigurationFinding =  New-DiagnosticFinding -Name "Analysis Configuration" -Severity Default -Format Table -InputObject $analysisConfiguration
                     $analysisJobFinding.ChildFindings.Add($AnalysisConfigurationFinding)
     
                 }else {
@@ -4465,7 +4567,7 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
     }
 
    
-    $UsageAndReportFinding = New-SPDiagnosticFinding -Name "Usage Analysis and Reporting Findings" -InputObject $null -Format Table
+    $UsageAndReportFinding = New-DiagnosticFinding -Name "Usage Analysis and Reporting Findings" -InputObject $null -Format Table
   
     #$UsageAndReportFinding.ChildFindings.Add((Get-SPDiagnosticFarmFindings))
     $UsageAndReportFinding.ChildFindings.Add((Get-SPAnalyticsTopologyDiagnosticFinding $script:ssa))
@@ -4879,7 +4981,7 @@ function AzureFrontDoorCiphersEnabled ($ServerName)
         }
     }
     
-    $afdFinding = New-SPDiagnosticFinding `
+    $afdFinding = New-DiagnosticFinding `
         -Name ("Azure Front Door Compatible Ciphers: {0}" -f $ServerName) `
         -Description "Azure Front Door (AFD) serves as a gateway for much of M365, as such most hybrid scenarios require the ability to establish a secure connection to AFD." `
         -ReferenceLink "https://learn.microsoft.com/en-us/azure/frontdoor/front-door-faq#what-are-the-current-cipher-suites-supported-by-azure-front-door-"
@@ -4915,12 +5017,12 @@ function AzureFrontDoorCiphersEnabled ($ServerName)
 
 function Get-SPDiagnosticsTlsFinding
 {
-    $finding = New-SPDiagnosticFinding `
+    $finding = New-DiagnosticFinding `
         -Name "TLS Configuration" `
         -InputObject $null `
         -Description "These findings are specific to enabling and providing support for TLS 1.2 connections, this is necessary in environments where TLS 1.0/1.1 has been disabled or when enabling hybrid or other functionality that requires connectivity to TLS 1.2 secured resources. Please refer to the reference material for more information."
 
-    $spVersion = getSPVersion
+    $spVersion = Get-SPVersion
     switch ($spVersion) {
         2013
         {
@@ -4949,7 +5051,7 @@ function Get-SPDiagnosticsTlsFinding
         try 
         {
             
-            $serverFinding = New-SPDiagnosticFinding `
+            $serverFinding = New-DiagnosticFinding `
                 -Name ("TLS Configurations: {0}" -f $server.Name) `
                 -InputObject $null
             
@@ -5140,6 +5242,13 @@ function main
         Add-PSSnapin Microsoft.SharePoint.PowerShell -ErrorAction SilentlyContinue | Out-Null
     }
 
+    $farm = [Microsoft.SharePoint.Administration.SPFarm]::Local
+    $joined = $farm.GetType().GetProperty("Joined").GetValue($farm)
+    if(!$joined)
+    {
+        throw (New-Object -TypeName System.Exception -ArgumentList "The server is not currently connected to a SharePoint farm")
+    }
+
     if($Help)
     {
         Get-SPFarmInfoHelp
@@ -5189,9 +5298,9 @@ function main
         Select-SPDiagnosticSSA
     }
 
-    $build = GetSPVersion $buildPrefix
+    $build = Get-SPVersion
     $rootFindingCollection = New-Object SPDiagnostics.FindingCollection[SPDiagnostics.Finding]
-    $rootFindingCollection.Add((Get-SPDiagnosticsSupportDateFinding))
+    $rootFindingCollection.Add((Get-SPDiagnosticSupportDateFinding))
     $rootFindingCollection.Add((Get-SPDiagnosticFarmFindings))
     $rootFindingCollection.Add((Get-SPDiagnosticAuthFindings))
     $rootFindingCollection.Add((Get-SPDiagnosticSearchFindings))
@@ -5218,7 +5327,7 @@ function main
         # If there's still a collection of errors, then report on it.
         if($error.Count -gt 0)
         {
-            $errorFinding = New-SPDiagnosticFinding -Name "Script Diagnostics" -InputObject $error -Format List
+            $errorFinding = New-DiagnosticFinding -Name "Script Diagnostics" -InputObject $error -Format List
             $errorFinding.Description = "These are errors generated ONLY during script execution. They do not represent an issue that needs to be resolved"
             $errorFinding.Description += "These are intended to assist with identifying SPFarmInfo script issues"
             $rootFindingCollection.Add($errorFinding)
