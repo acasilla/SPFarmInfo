@@ -235,7 +235,7 @@ function New-DiagnosticFinding
 
     if($Severity -ge 2 -and [string]::IsNullOrEmpty($WarningMessage))
     {
-        throw (New-Object System.ArgumentException -ArgumentList @("Warning message cannot be empty for an error or warning finding"))
+        #throw (New-Object System.ArgumentException -ArgumentList @("Warning message cannot be empty for an error or warning finding"))
     }
 
 
