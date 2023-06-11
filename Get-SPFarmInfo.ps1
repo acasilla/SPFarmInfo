@@ -17,7 +17,7 @@
     An html report documenting findings.
 .NOTES
     General notes
-    Version 3.0
+    Version 3.x
 
 DISCLAIMER
  This script is not supported under any Microsoft standard support program or service. 
@@ -70,7 +70,7 @@ if([System.IntPtr]::Size -lt 8)
     exit
 }
 
-$ScriptVersion="3.0.2305.1103"
+$ScriptVersion="3.0.2305.2601"
 
 #region CoreFramework
 
@@ -1181,7 +1181,7 @@ function Get-SPDiagnosticFarmBuildInfo
         LogMaxDiskSpaceUsageEnabled = $SPDiagnosticConfig.LogMaxDiskSpaceUsageEnabled
         LogDiskSpaceUsageGB = $SPDiagnosticConfig.LogDiskSpaceUsageGB
         "VerboseEx LogLevel Count" = $countOfVerboseEx
-        ConfigDbName = $configDb.Name
+        ConfigDbName = $(Obfuscate $configDb.Name "configdb")
         ConfigDbId = $configDb.Id
         ConfigDbSql = $(obfuscate $configDb.ServiceInstance.Server.Address "sqlserver")
         ConfigDbInstance = $(obfuscate $configDb.ServiceInstance.Instance "sqlinstance")
@@ -1314,7 +1314,7 @@ function Get-SPDiagnosticServersInFarm
         {
             $finding.WarningMessage += "The server $($($CustomRoleServers[0])) is running in MinRole Custom. Servers in the Custom MinRole are not self healing."
         } else {
-            $finding.WarningMessage += "The servers $($($CustomRoleServers -join ",")) are running in MinRole Custom. Servers in the Custom MinRole are not self healing."
+            $finding.WarningMessage += "The servers '$($($CustomRoleServers -join ", "))' are running in MinRole Custom. Servers in the Custom MinRole are not self healing."
         }
         $finding.ReferenceLink +="https://learn.microsoft.com/en-us/SharePoint/install/overview-of-minrole-server-roles-in-sharepoint-server#how-does-minrole-improve-performance-and-reliability"
     } 
@@ -1623,6 +1623,7 @@ function Get-SPDiagnosticServicesOnServer
         }
     }
 
+    $runningServices = $runningServices | sort-object Server, Service, status
     $finding = New-DiagnosticFinding -Name "Services on Server" -InputObject $runningServices -Format Table
     
     $troubleServices = $runningServices | Where-Object{$_.Status -ne [Microsoft.SharePoint.Administration.SPObjectStatus]::Online}
@@ -1769,11 +1770,11 @@ function Get-SPDiagnosticServiceAppInfo
 {
     [cmdletbinding()]
     Param()
-    $serviceApps = Get-SPServiceApplication | Select-Object DisplayName, TypeName, Id, Status
+    $serviceApps = Get-SPServiceApplication | Select-Object DisplayName, TypeName, Id, Status | sort-object Typename, Status
     $serviceAppFinding = New-DiagnosticFinding -Name "Service Applications" -InputObject $serviceApps -Format Table
 
     ## Dump out proxies as well
-    $proxies = Get-SPServiceApplicationProxy | Select-Object DisplayName, TypeName, Id, Status
+    $proxies = Get-SPServiceApplicationProxy | Select-Object DisplayName, TypeName, Id, Status | sort-object TypeName, Status
     $proxyFinding = New-DiagnosticFinding -Name "Service Application Proxies" -InputObject $proxies -Format Table
 
     ## As a child finding dump out the service application associations
@@ -1789,6 +1790,7 @@ function Get-SPDiagnosticServiceAppInfo
             }
         }
     }
+    $proxyGroupObjects = $proxyGroupObjects | Sort-Object ProxyGroup, Proxy
     $proxyGroupFinding = New-DiagnosticFinding -Name "Proxy Group Associations" -InputObject $proxyGroupObjects -Format Table
 
     $serviceAppFinding.ChildFindings.Add($proxyFinding)
@@ -1805,7 +1807,7 @@ function Get-SPDiagnosticServiceAppInfo
         $apo | add-member -MemberType NoteProperty -Name "ProcessAccountName" -Value $(Obfuscate $ap.ProcessAccountName "User")
         $ServieAppPools += $apo
     }
-
+    $ServieAppPools = $ServieAppPools | sort-object DisplayName
     $spServiceAppPoolFinding = New-DiagnosticFinding -Name "Service Application Pools" -InputObject $ServieAppPools -Format Table
     $serviceAppFinding.ChildFindings.add($spServiceAppPoolFinding)
 
@@ -2412,9 +2414,10 @@ function Get-SPDiagnosticsWebAppsFinding
                     $IISSettingsFinding.ChildFindings.Add((Get-SPDiagnosticsExtraBindingsOnIIS $webapp $aam.Zone))
                     $WebAppFinding.ChildFindings.Add($iisSettingsFinding)
                 }
-            }            
+            }
         }
-		$dbInfo = $webApp.ContentDatabases | Select-Object Name, @{N='SiteCount'; E={$_.CurrentSiteCount}}, Id, Status, BuildVersion,  @{N='DB Server' ; E={$(Obfuscate $_.NormalizedDataSource "dbserver")}} ,@{N="DB Size(GB)"; E={$([string]([System.Math]::Round($_.DiskSizeRequired/1gb,2)))}}, IsReadOnly, IsAttachedToFarm, IsSqlAzure, PreferredTimerServerInstance, @{N='Rbs Enabled'; E={$_.RemoteBlobStorageSettings.Enabled}},  @{N='Rbs Provider'; E={$_.RemoteBlobStorageSettings.ActiveProviderName}}
+		$dbInfo = $webApp.ContentDatabases | Select-Object  @{N='Name'; E={$(Obfuscate $_.Name "database")}} , @{N='SiteCount'; E={$_.CurrentSiteCount}}, Id, Status, BuildVersion,  @{N='DB Server' ; E={$(Obfuscate $_.NormalizedDataSource "dbserver")}} ,@{N="DB Size(GB)"; E={$([string]([System.Math]::Round($_.DiskSizeRequired/1gb,2)))}}, IsReadOnly, IsAttachedToFarm, IsSqlAzure, PreferredTimerServerInstance, @{N='Rbs Enabled'; E={$_.RemoteBlobStorageSettings.Enabled}},  @{N='Rbs Provider'; E={$_.RemoteBlobStorageSettings.ActiveProviderName}}
+		#$dbInfo = $webApp.ContentDatabases | Select-Object  Name, @{N='SiteCount'; E={$_.CurrentSiteCount}}, Id, Status, BuildVersion,  @{N='DB Server' ; E={$(Obfuscate $_.NormalizedDataSource "dbserver")}} ,@{N="DB Size(GB)"; E={$([string]([System.Math]::Round($_.DiskSizeRequired/1gb,2)))}}, IsReadOnly, IsAttachedToFarm, IsSqlAzure, PreferredTimerServerInstance, @{N='Rbs Enabled'; E={$_.RemoteBlobStorageSettings.Enabled}},  @{N='Rbs Provider'; E={$_.RemoteBlobStorageSettings.ActiveProviderName}}
         $cdbfinding = New-DiagnosticFinding -Name "Content Database(s) Information" -Severity Default -InputObject $dbInfo -Format Table
         $WebAppFinding.ChildFindings.Add($cdbfinding)
         $WebAppFinding.ChildFindings.Add((Get-SPWebAppApplicationPool $webapp))
@@ -2438,9 +2441,11 @@ function Get-SPDiagnosticsWebAppsFinding
             $webAppFinding.WarningMessage += "Web applications must have a site collection present at their root url."
             $webAppFinding.WarningMessage += "Please create a site collection at $(Obfuscate $($webApp.Url) "url")"
         }
-
-        $rootsite.Close()
-        $rootSite.Dispose()
+        else 
+        {
+            $rootsite.Close()
+            $rootSite.Dispose()
+        }
         
         $webAppsFinding.ChildFindings.Add($webAppFinding)
     }
@@ -2475,6 +2480,7 @@ function Get-SPDiagnosticsAppPoolsFinding
         
         $AppPoolInfos += $AppPoolInfo
     }
+    $AppPoolInfos = $AppPoolInfos | Sort-Object "AppPool DisplayName"
     $AppPoolsFinding = New-DiagnosticFinding -name "Content Application Pools" -severity default -InputObject $AppPoolInfos -Format Table 
 
     $NumAppPools = ($appPools.AppPoolName | Sort-Object -unique).count
@@ -2998,6 +3004,9 @@ Function Get-SPDiagnosticsMissingSTSHeader ($webapp)
             {
                 $MissingSTSHeaderFinding.Severity = [SPDiagnostics.Severity]::Warning
                 $MissingSTSHeaderFinding.WarningMessage +=("Missing IIS ResponseHeader 'MicrosoftSharePointTeamServices'")
+                $MissingSTSHeaderFinding.Description += "If this HTTP Response Header is missing, it will prevent the crawler from discovering that the site is SharePoint and will not use the 'sitedata.asmx' web service to enumerate the SP Content.<br/>"
+                $MissingSTSHeaderFinding.Description += "Office Client integration can be impacted as well when this header is missing.<br/>"
+                $MissingSTSHeaderFinding.Description += "This is often removed manually, in the web.config, or 'Client Integration' is turned off within 'Central Admin > Web Apps > Auth provider'<br/>"
             } 
             $MissingSTSHeaderFinding.inputObject = $SPTeamServicesHeaderValues
         }
@@ -3048,7 +3057,9 @@ function Get-SPDiagnosticsBlobCache ($webapp)
     if (!(IsElevated))
     {
         $BlobCachefindings.Description += "This data can only be collected when the Script is executed with 'Run as Administrator'"
-    } else {
+    } 
+    else
+    {
 
         if (!($Script:Build -eq "2013"))
         {
@@ -3067,12 +3078,12 @@ function Get-SPDiagnosticsBlobCache ($webapp)
 
                             $bc=$doc.configuration.SharePoint.BlobCache
                             $bc = $bc | Select-Object Location, Path, MaxSize, Enabled,ImageRenditionMaxFileSize,ImageRenditionMaxSourcePixels
-                            $BlobCachefinding = New-DiagnosticFinding -Name "BlobCache Setting - Web Application $(Obfuscate $($webapp.name) "webapp") - Zone: $Zone on server $(Obfuscate $env:COMPUTERNAME "computer")" -Severity Default -InputObject $bc -Format list
+                            $BlobCachefinding = New-DiagnosticFinding -Name "BlobCache Setting - Web Application '$(Obfuscate $($webapp.name) "webapp")' - Zone: '$Zone' on server '$(Obfuscate $env:COMPUTERNAME "computer")'" -Severity Default -InputObject $bc -Format list
 
                             if ($bc.Enabled -eq "False")
                             {
                                 $BlobCachefinding.Severity = [SPDiagnostics.Severity]::Informational
-                                $BlobCachefinding.Description +="BlobCache not enabled for Web Application $(Obfuscate $($webapp.Name) "webapp") in Zone $Zone on server $(Obfuscate $env:COMPUTERNAME "computer"))."
+                                $BlobCachefinding.Description +="BlobCache not enabled for Web Application - '$(Obfuscate $($webapp.Name) "webapp")' - Zone: '$Zone' on server '$(Obfuscate $env:COMPUTERNAME "computer")'."
                                 $BlobCachefindings.Description += "A PowerShell script to manage the BlobCache Settings can be downloaded from https://github.com/rainerasbach/ManageBlobCache/blob/main/ManageBlobCache.ps1 "        
                             }
 
@@ -3081,7 +3092,9 @@ function Get-SPDiagnosticsBlobCache ($webapp)
                     }
                 }
             }
-        } else {
+        }
+        else
+        {
             $BlobCachefindings.Description += "This data can't be collected on SharePoint Server 2013"
         }
     }
@@ -3176,7 +3189,7 @@ function Get-SPDiagnosticsSideBySidePathcingFinding
         -ReferenceLink "https://blog.stefan-gossner.com/2017/01/10/sharepoint-server-2016-patching-using-side-by-side-functionality-explained/" `
         -InputObject $retObj `
         -Format List
-    if($sbsTokenIsCurrent -eq $false)
+    if(!($sbsTokenIsCurrent) -and $sbsEnabled)
     {
         $finding.Severity = [SPDiagnostics.Severity]::Critical
         $finding.WarningMessage = "SideBySideToken is not the current farm build, consider updating the side by side value to the current farm build or disabling side by side functionality."
@@ -3219,7 +3232,7 @@ function Get-SPDiagnosticsFarmSolutionsFinding
         $farmSolutionsFinding.Description += "No farm solutions present"
         return $farmSolutionsFinding
     }
-
+    $solutions = $solutions | sort-object "Name"
     foreach($solution in $solutions)
     {
         #Obfuscate "LastOperationDetails" by omitting it since it is not possible to reliably obfuscate this clear text data
@@ -3338,21 +3351,81 @@ Function Get-SPDiagnosticsFarmFeaturesFinding
 {
 
         $FeaturesFinding = New-DiagnosticFinding -Name "Features" -InputObject $null -Format List 
+        $culture = [System.Globalization.CultureInfo]::CurrentCulture
 
-        $FarmFeatures = get-spfeature | select-Object Id, Displayname, SolutionID,CompatibilityLevel,Version,Scope | where-object {$_.scope -eq "Farm"}
-        $FarmFeaturesFinding = New-DiagnosticFinding -Name "  Farm Features ($($FarmFeatures.Count))" -InputObject $FarmFeatures -Format Table 
+        ### Farm Features ###
+        
+        $farmFeatures = get-spfeature | where-object {$_.scope -eq "Farm"}
+        $farmFeatureResults = @()
+        foreach($farmFeature in $farmFeatures)
+        {
+            $farmFeatureObj = New-Object PSObject
+            $farmFeatureObj | Add-Member -MemberType NoteProperty -Name Title -Value $farmFeature.GetTitle($culture)
+            $farmFeatureObj | Add-Member -MemberType NoteProperty -Name Id -Value $farmFeature.Id
+            $farmFeatureObj | Add-Member -MemberType NoteProperty -Name DisplayName -Value $farmFeature.DisplayName
+            $farmFeatureObj | Add-Member -MemberType NoteProperty -Name SolutionId -Value $farmFeature.SolutionId
+            $farmFeatureObj | Add-Member -MemberType NoteProperty -Name CompatibilityLevel -Value $farmFeature.CompatibilityLevel
+            $farmFeatureObj | Add-Member -MemberType NoteProperty -Name Version -Value $farmFeature.Version
+            $farmFeatureResults += $farmFeatureObj
+
+        }
+
+        $FarmFeaturesFinding = New-DiagnosticFinding -Name "  Farm Features ($($FarmFeatures.Count))" -InputObject $farmFeatureResults -Format Table 
         $FeaturesFinding.ChildFindings.Add(($FarmFeaturesFinding))
 
-        $webAppFeatures = get-spfeature | select-Object Id, Displayname,SolutionID,CompatibilityLevel,Version,Scope | where-object {$_.scope -eq "webApplication"}
-        $WebAppFeaturesFinding = New-DiagnosticFinding -Name "  WebApplication Features ($($webAppFeatures.Count))" -InputObject $webAppFeatures -Format Table 
+        ### WebApp Features ###
+        $webAppFeatures = get-spfeature | where-object {$_.scope -eq "webApplication"}
+        $waFeatureResults = @()
+        foreach($waFeature in $webAppFeatures)
+        {
+            $waFeatureObj = New-Object PSObject
+            $waFeatureObj | Add-Member -MemberType NoteProperty -Name Title -Value $waFeature.GetTitle($culture)
+            $waFeatureObj | Add-Member -MemberType NoteProperty -Name Id -Value $waFeature.Id
+            $waFeatureObj | Add-Member -MemberType NoteProperty -Name DisplayName -Value $waFeature.DisplayName
+            $waFeatureObj | Add-Member -MemberType NoteProperty -Name SolutionId -Value $waFeature.SolutionId
+            $waFeatureObj | Add-Member -MemberType NoteProperty -Name CompatibilityLevel -Value $waFeature.CompatibilityLevel
+            $waFeatureObj | Add-Member -MemberType NoteProperty -Name Version -Value $waFeature.Version
+            $waFeatureResults += $waFeatureObj
+
+        }
+
+        $WebAppFeaturesFinding = New-DiagnosticFinding -Name "  WebApplication Features ($($webAppFeatures.Count))" -InputObject $waFeatureResults -Format Table 
         $FeaturesFinding.ChildFindings.Add(($WebAppFeaturesFinding))
 
-        $SiteFeatures = get-spfeature | select-Object Id, Displayname,SolutionID,CompatibilityLevel,Version,Scope | where-object {$_.scope -eq "Site"}
-        $SiteFeaturesFinding = New-DiagnosticFinding -Name "  Site Features ($($SiteFeatures.Count))" -InputObject $SiteFeatures -Format Table 
+        ### SiteCollection Features ###
+        $siteFeatures = get-spfeature | where-object {$_.scope -eq "Site"}
+        $scFeatureResults = @()
+        foreach($siteFeature in $siteFeatures)
+        {
+            $scFeatureObj = New-Object PSObject
+            $scFeatureObj | Add-Member -MemberType NoteProperty -Name Title -Value $siteFeature.GetTitle($culture)
+            $scFeatureObj | Add-Member -MemberType NoteProperty -Name Id -Value $siteFeature.Id
+            $scFeatureObj | Add-Member -MemberType NoteProperty -Name DisplayName -Value $siteFeature.DisplayName
+            $scFeatureObj | Add-Member -MemberType NoteProperty -Name SolutionId -Value $siteFeature.SolutionId
+            $scFeatureObj | Add-Member -MemberType NoteProperty -Name CompatibilityLevel -Value $siteFeature.CompatibilityLevel
+            $scFeatureObj | Add-Member -MemberType NoteProperty -Name Version -Value $siteFeature.Version
+            $scFeatureResults += $scFeatureObj
+
+        }
+        $SiteFeaturesFinding = New-DiagnosticFinding -Name "  Site Features ($($SiteFeatures.Count))" -InputObject $scFeatureResults -Format Table 
         $FeaturesFinding.ChildFindings.Add(($SiteFeaturesFinding))
 
-        $WebFeatures = get-spfeature | select-Object Id, Displayname,SolutionID,CompatibilityLevel,Version,Scope | where-object {$_.scope -eq "Web"}
-        $WebFeaturesFinding = New-DiagnosticFinding -Name "  Web Features ($($WebFeatures.Count))" -InputObject $WebFeatures -Format Table 
+        ### Web Features ###
+        $webFeatures = get-spfeature | where-object {$_.scope -eq "Web"}
+        $webFeatureResults = @()
+        foreach($webFeature in $webFeatures)
+        {
+            $webFeatureObj = New-Object PSObject
+            $webFeatureObj | Add-Member -MemberType NoteProperty -Name Title -Value $webFeature.GetTitle($culture)
+            $webFeatureObj | Add-Member -MemberType NoteProperty -Name Id -Value $webFeature.Id
+            $webFeatureObj | Add-Member -MemberType NoteProperty -Name DisplayName -Value $webFeature.DisplayName
+            $webFeatureObj | Add-Member -MemberType NoteProperty -Name SolutionId -Value $webFeature.SolutionId
+            $webFeatureObj | Add-Member -MemberType NoteProperty -Name CompatibilityLevel -Value $webFeature.CompatibilityLevel
+            $webFeatureObj | Add-Member -MemberType NoteProperty -Name Version -Value $webFeature.Version
+            $webFeatureResults += $webFeatureObj
+
+        }
+        $WebFeaturesFinding = New-DiagnosticFinding -Name "  Web Features ($($WebFeatures.Count))" -InputObject $webFeatureResults -Format Table 
         $FeaturesFinding.ChildFindings.Add(($WebFeaturesFinding))
 
         $FeaturesFinding.Description += "Installed Features in the farm"
@@ -4179,7 +4252,8 @@ function Get-SPDiagnosticSearchFindings
         $ssaCount++
         $crawlAccount = (New-Object Microsoft.Office.Server.Search.Administration.Content $ssa).DefaultGatheringAccount
         #$ssaName = "SSA " + $ssaCount + ":  " + "<span style='color:#0072c6'>'" + $ssa.Name +"'</span>" + " || <span style='color:gray'>CrawlAccount: " + $crawlAccount + "</span>"
-        $ssaName = "SSA " + $ssaCount + ":  " + $(Obfuscate $ssa.Name  "searchserviceapplication")+ " || CrawlAccount: " + $(Obfuscate $crawlAccount "user")
+        #$ssaName = "SSA " + $ssaCount + ":  " + $(Obfuscate $ssa.Name  "searchserviceapplication") + " || CrawlAccount: " + $(Obfuscate '$crawlAccount' "user")
+        $ssaName = "SSA " + $ssaCount + ": '" + $(Obfuscate $ssa.Name  "searchserviceapplication") + "'" + " || CrawlAccount: '" + $(Obfuscate $crawlAccount "user") + "'"
         $ssaFindings = New-DiagnosticFinding -Name $ssaName -Severity Default -InputObject $null   # this could be moved into the Get-SPDiagnosticsSSAObject func
         #$ssaFindings.Description+=("CrawlAccount: " + $(Obfuscate $crawlAccount "username")
         if($ssa.NeedsUpgradeIncludeChildren -eq $true -or $ssa.NeedsUpgrade -eq $true)
@@ -4505,40 +4579,40 @@ function Get-SPDiagnosticsSSADatabases
     $apcStores = [array]$searchApplication.AnalyticsReportingStores
     
     $dbCollection = @()
-    $dbCollection += [pscustomobject]@{DatabaseServer = $(Obfuscate $searchApplication.SearchAdminDatabase.Server.Name "dbserver"); DatabaseType = "Administration Database"; DatabaseName = $ssaAdminDb }
+    $dbCollection += [pscustomobject]@{DatabaseServer = $(Obfuscate $searchApplication.SearchAdminDatabase.Server.Name "dbserver"); DatabaseType = "Administration Database"; DatabaseName = $(obfuscate $ssaAdminDb "searchadminDB")}
     
     if($apcStores.Count -eq 1)
     {
-       $dbCollection += [pscustomobject]@{DatabaseServer = $(Obfuscate $apcStores[0].Database.Server.Name "dbserver"); DatabaseType = "Analytics Database"; DatabaseName = $apcStores[0].Database.Name }
+       $dbCollection += [pscustomobject]@{DatabaseServer = $(Obfuscate $apcStores[0].Database.Server.Name "dbserver"); DatabaseType = "Analytics Database"; DatabaseName = $(obfuscate $apcStores[0].Database.Name "searchanalyticsdb") }
     }
     else
     {
       foreach($apcStore in $apcStores | Sort-Object -Property Name)
       {
-        $dbCollection += [pscustomobject]@{DatabaseServer = $(Obfuscate $apcStore.Database.Server.Name "dbserver"); DatabaseType = "Analytics Database"; DatabaseName = $apcStore.Database.Name }
+        $dbCollection += [pscustomobject]@{DatabaseServer = $(Obfuscate $apcStore.Database.Server.Name "dbserver"); DatabaseType = "Analytics Database"; DatabaseName = $(obfuscate $apcStore.Database.Name "searchanalyticsdb")}
       }
     }
     if($crawlStores.Count -eq 1)
     {
-        $dbCollection += [pscustomobject]@{DatabaseServer = $(Obfuscate $crawlStores[0].Database.Server.Name "dbserver"); DatabaseType = "Crawl Database"; DatabaseName = $crawlStores[0].Database.Name }
+        $dbCollection += [pscustomobject]@{DatabaseServer = $(Obfuscate $crawlStores[0].Database.Server.Name "dbserver"); DatabaseType = "Crawl Database"; DatabaseName = $(obfuscate $crawlStores[0].Database.Name "searchcrawldb")}
     }
     else
     {
       foreach($crawlStore in $crawlStores | Sort-Object -Property Name)
       {
-        $dbCollection += [pscustomobject]@{DatabaseServer = $(Obfuscate $crawlStore.Database.Server.Name "dbserver"); DatabaseType = "Crawl Database"; DatabaseName = $crawlStore.Database.Name }
+        $dbCollection += [pscustomobject]@{DatabaseServer = $(Obfuscate $crawlStore.Database.Server.Name "dbserver"); DatabaseType = "Crawl Database"; DatabaseName = $(obfuscate $crawlStore.Database.Name "searchcrawldb")}
       }
         
     }
     if($linkStores.Count -eq 1)
     {
-       $dbCollection += [pscustomobject]@{DatabaseServer = $(Obfuscate $linkStores[0].Database.Server.Name "dbserver"); DatabaseType = "Link Database"; DatabaseName = $linkStores[0].Database.Name }
+       $dbCollection += [pscustomobject]@{DatabaseServer = $(Obfuscate $linkStores[0].Database.Server.Name "dbserver"); DatabaseType = "Link Database"; DatabaseName = $(obfuscate $linkStores[0].Database.Name "searchlinkstoredb") }
     }
     else
     {
       foreach($linksStore in $linkStores | Sort-Object -Property Name)
       {
-        $dbCollection += [pscustomobject]@{DatabaseServer = $(Obfuscate $linksStore.Database.Server.Name "dbserver"); DatabaseType = "Link Database"; DatabaseName = $linksStore.Database.Name }
+        $dbCollection += [pscustomobject]@{DatabaseServer = $(Obfuscate $linksStore.Database.Server.Name "dbserver"); DatabaseType = "Link Database"; DatabaseName = $(obfuscate  $linksStore.Database.Name "searchlinkstoredb") }
       }
     }
     $searchDbFinding.InputObject = $dbCollection
@@ -5105,37 +5179,47 @@ function Get-SPDiagnosticsCheckForRoot
         $at = Get-SPEnterpriseSearchTopology -SearchApplication $ssa -Active
         $topoCompList = Get-SPEnterpriseSearchComponent -SearchTopology $at
         $components = $topoCompList | Select-Object ServerName -Unique
-        $missingRootCollection = @()
         $cRootCollection = @()
         $cRootFinding = New-DiagnosticFinding -Name "'C:\Root' Finding" -InputObject $null -format Table
+        $MissingRoot = $false
         foreach($searchServer in $components)
         {
             $rootDirectory = "\\" + $searchServer.ServerName + "\c$\root" 
             if(Test-Path $rootDirectory)
             {
+                # Has the root folder. Add to cRootCollection w/FALSE
                 $cRootCollection +=[PSCustomObject]@{
-                   Server = $(obfuscate $searchServer.ServerName "computer")
-                   "Missing 'C:\Root' " = 'False'
-                   SSA = $ssa.DisplayName
+                    Server = $(obfuscate $searchServer.ServerName "computer")
+                    "Missing 'C:\Root' " = 'False'
+                    SSA = $ssa.DisplayName
                 }
-                $cRootFinding.Description += ("<ul style='color:green'> All of the search servers contain the 'C:\Root' folder</ul>")
-
             }
             else
             {
-                $missingRootCollection+=[PSCustomObject]@{
-                   Server = $(obfuscate $searchServer.ServerName "computer")
-                   "Missing 'C:\Root' " = 'True'
-                   SSA = $ssa.DisplayName
+                # Flag that we have some missing c:\root folders on search servers
+                $MissingRoot = $true
+                # Add the missing root server to the collection with TRUE
+                $cRootCollection+=[PSCustomObject]@{
+                    Server = $(obfuscate $searchServer.ServerName "computer")
+                    "Missing 'C:\Root' " = 'True'
+                    SSA = $ssa.DisplayName
                 }
-                
-                $cRootFinding.Severity = [SPDiagnostics.Severity]::Critical
-                $cRootFinding.WarningMessage = "One or more Servers are missing the 'C:\root' folder"
-                $cRootFinding.Description += ("<li> Each server in the Search Topology should have the 'c:\root' folder.</li>")
-                $cRootFinding.Description += ("<li> If the 'C:\root' is missing, your SSA will not provision.</li>")
-                $cRootFinding.Description += ("<li> If you are missing this folder, you will need to delete the SSA you are trying to provision, create the 'c:\root' on the server and re-create the SSA</li><br/>")
-                $cRootFinding.InputObject = $missingRootCollection
             }
+            }
+        # Add the cRootCollection to the cRootFinding
+        $cRootFinding.InputObject = $cRootCollection
+        if($MissingRoot)
+        {
+            # We're missing some root findings so set the severity to Critical and set the warning message and description
+            $cRootFinding.Severity = [SPDiagnostics.Severity]::Critical
+            $cRootFinding.WarningMessage = "One or more Servers are missing the 'C:\root' folder"
+            $cRootFinding.Description += ("<li> Each server in the Search Topology should have the 'c:\root' folder, unless you only have the 'CrawlComponent' on this search server.</li>")
+            $cRootFinding.Description += ("<li> If the 'C:\root' is missing, your SSA will not provision.</li>")
+            $cRootFinding.Description += ("<li> If you are missing this folder, you will need to delete the SSA you are tried to create\provision, and then manually create the 'c:\root' on the server and re-create the SSA</li><br/>")
+        }
+        else
+        {
+            $cRootFinding.Description += ("<ul style='color:green'> All of the search servers contain the 'C:\Root' folder</ul>")            
         }
     }
     return $cRootFinding
@@ -5161,7 +5245,7 @@ function Get-SPDiagnosticsSSAEndpoints
                 #$request = $null
                 #$request = [System.Net.WebRequest]::Create($sqssUri)
                 #$request.UseDefaultCredentials = $true
-                $response = $(Invoke-WebRequest -Uri $sqssUri -Method Get).StatusDescription
+                $response = $(Invoke-WebRequest -Uri $sqssUri -Method Get -UseBasicParsing).StatusDescription
                 #$finding.Description+=("<li>" + $sqssUri.ToString() + " -- " + $response.ToString() + "</li>")
 
                 #Obfuscate
@@ -5194,7 +5278,7 @@ function Get-SPDiagnosticsSSAEndpoints
                 #$request = [System.Net.WebRequest]::Create($searchAdminUri)
                 #$request.UseDefaultCredentials = $true
                 #$response = $request.GetResponse()
-                $response = $(Invoke-WebRequest -Uri $searchAdminUri -Method Get).StatusDescription
+                $response = $(Invoke-WebRequest -Uri $searchAdminUri -Method Get -UseBasicParsing).StatusDescription
                 #$finding.Description+=("<li>" + $searchAdminUri.ToString() + " -- " + $response.ToString() + "</li>")
                #Obfuscate
                $server = $searchAdminUri.ToString().split('/')[2].split(':')[0]
@@ -8280,7 +8364,7 @@ function Get-MirroredDBsFinding
 {
     $MirroredDBFinding = New-DiagnosticFinding -Name "Mirrored Databases" -InputObject $null -Format Table
 
-    $MirrorDB= get-spdatabase | Where-Object {$_.FailoverServer -or $_.FailoverInstance} | Select-Object name, @{N='server';E={$(Obfuscate $_.server "sqlserver")}} , @{N='FailoverServer';E={$(Obfuscate $_.FailoverServer.Name "sqlserver")}}
+    $MirrorDB= get-spdatabase | Where-Object {$_.FailoverServer -or $_.FailoverInstance} | Select-Object @{N='Name';E={$(Obfuscate $_.Name "database")}}, @{N='server';E={$(Obfuscate $_.server "sqlserver")}} , @{N='FailoverServer';E={$(Obfuscate $_.FailoverServer.Name "sqlserver")}}
     if ($MirrorDB.count -eq 0)
     {
         $MirroredDBFinding.Description += "No mirrored databases in the farm."
@@ -8305,7 +8389,7 @@ function Get-GetDBCompatibilityLevelFinding ($DBServer)
     
     $dbcompatLevels = Invoke-SPSqlCommand -spDatabase $ServerDBS[0] -query $sqlquery -ErrorAction SilentlyContinue
 
-    $DBCompatibilityLevelFinding.InputObject = $dbcompatLevels | select-Object Name, Compatibility_Level
+    $DBCompatibilityLevelFinding.InputObject = $dbcompatLevels | select-Object @{N='Name';E={$(Obfuscate $_.Name "database")}}, Compatibility_Level
     return $DBCompatibilityLevelFinding
 }
 #endregion
@@ -8386,7 +8470,7 @@ Function Get-SPDiagnosticSQLFindings()
             {
                 $SQLServerData  | add-member -memberType NoteProperty -name "Cluster" -value "SQL Server is not running as part of a Cluster"
             } else {
-                $CNodes = $ClusterNodes -Join (',')
+                $CNodes = $ClusterNodes -Join (',')  #ToDo:  Obfuscate
                 $SQLServerData  | add-member -memberType NoteProperty -name "Cluster Nodes" -value $Cnodes
             }
 
@@ -8411,7 +8495,7 @@ Function Get-SPDiagnosticSQLFindings()
                 #Cluster Info
                 $ClusterInfo = new-object PSObject
                 $ClusterName = $(obfuscate $AAG_ClusterInfo[0] "sqlclustername")
-                $ClusterInfo | add-member -memberType NoteProperty -name "Cluster name" -value $ClusterName
+                $ClusterInfo | add-member -memberType NoteProperty -name "Cluster name" -value $ClusterName #is already obfuscated
                 $ClusterInfo | add-member -memberType NoteProperty -name "Quorum Type" -value $AAG_ClusterInfo[2]
                 $ClusterInfo | add-member -memberType NoteProperty -name "Quorum State" -value $AAG_ClusterInfo[4]
                 $AAGClusterFinding.InputObject = $ClusterInfo
@@ -8997,9 +9081,11 @@ function main
         $Script:ObfuscateList | Export-Clixml -LiteralPath  $ObfuscateFile -Force
     }
 
-
-    Invoke-Item $fileName
-
+    # Do not attempt to load the HTML file on Server Core
+    if (!((Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\windows NT\CurrentVersion" -Name "InstallationType").InstallationType -match "Core"))
+    {
+        Invoke-Item $fileName
+    }
     Write-Host ("`n`nScript complete, review the output file at `"{0}`"" -f $fileName) -ForegroundColor Green
 
     #reset ProgressPreference back to original value. Note: This does not work without using $global prefix
