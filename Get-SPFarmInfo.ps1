@@ -73,7 +73,7 @@ if([System.IntPtr]::Size -lt 8)
     exit
 }
 
-$ScriptVersion="3.0.2307.2005"
+$ScriptVersion="3.0.2310.1835"
 $script:PreviousFindingTime= Get-Date
 #region CoreFramework
 
@@ -465,7 +465,10 @@ function Write-DiagnosticFindingFragment
             }
 
             # Configure buttons for copying to the clipboard
-            $htmlFragment += "&nbsp;&nbsp;<input type=`"button`" Title=`"Copy table to clipboard as HTML`" value=`"HTML`" onclick=`"copyToClipboardHtml(document.getElementById('{0}'))`"/>&nbsp;<input type=`"button`" Title=`"Copy table to clipboard as text`"value=`"Text`" onclick=`"copyToClipboardText(document.getElementById('{0}'))`"/></div>" -f $CopyToClipBoardGuid
+            $htmlButton = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABkAAAAZCAYAAADE6YVjAAAACXBIWXMAAA7EAAAOxAGVKw4bAAABeElEQVRIibWWsYrCQBCGv8h1voOdL2CplcZOuMJKfQILQTB9imusEhBsBPMSygmCCr6AhQ8gRKxSiqn3iiV3SS7GTdQfhuzO7O7P/LOTRBNCCN6MwrsJAD7SgoZhJPqHwyGlUkmdRaRgNBol+kzTFK7rpm2NIDWTJFiWlXVLulwBWuYCgO+vTyCHjFnlyiOj0u1qmYtfS0On08FxHM7nc8SvJFcgUxJ5OD6fzwGYTCaR2mWqSZwwPA4fGq/ZSzJ5tDbzFVYhz0wSTz0sy0syedR4qpkUAGxbWhy6Duu10jmpyF2Te13/MpKs7y+ljvd9KV1gg4GUUddlLIBtg+OA50G3m0BiGKBpUdvtZKxYhO0WajXo92E6hesVLhdYreQaz4PZDFwXbjc4HBJILAuEiFqjkZ5hpQL7vRwvl3KehKc+v+WyfB6PsNlAu/0GEoBeD8ZjaDbvr3mapFqV9ajX/8dMU5omhPovke/LS3BvHvadTn++TCR58QMjoESxLJb7twAAAABJRU5ErkJggg=="
+            $textButton = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABkAAAAZCAYAAADE6YVjAAAACXBIWXMAAA7EAAAOxAGVKw4bAAABXUlEQVRIibWWMaoCMRRFz3x+Z2chVpZuxFL4nTCuQVDUyiaF2FoIls4GnE6wsHQJLkBBsRrQzvr9IqgzEmOizoWQ8DIvl3uTvEwgIkLO+MmbAODXNtnv943xTqdDpVJxZxELer2eMaaUkv1+b0vNwKrEhPF47Jtit+uKuloAsBz+AW/Y6GvXOzY6na66WtyaDWEYEkURh8MhE3ey62qTiTw9P5vNAJhMJpm989qTR8L0OL3o4559Rcmrb72PsAu5N8mj9LQtX1Hy6uK5Krkd4SSBIDC3OHZa6yluSkoluBb9OIb1GqbT54nPbr2VxAe+9cv5PWk2YbfT4yjSamu1e7NaaqpN87lIq2WObTYiYXiPV6si262tAjrWLoBGQ/fdLgwGrlkaXs9vsQjHI5TLOZGsVnA+w2gEw2EOJEkC7TYopW07nTSpKwIRt1+iJNF3CeBy0X2hkI1/TPIJ/gHPkoS9HAjyhAAAAABJRU5ErkJggg=="
+            #$htmlFragment += "&nbsp;&nbsp;<input type=`"button`" Title=`"Copy table to clipboard as HTML`" value=`"HTML`" onclick=`"copyToClipboardHtml(document.getElementById('{0}'))`"/>&nbsp;<input type=`"button`" Title=`"Copy table to clipboard as text`"value=`"Text`" onclick=`"copyToClipboardText(document.getElementById('{0}'))`"/></div>" -f $CopyToClipBoardGuid
+            $htmlFragment += "&nbsp;&nbsp;<input type=`"image`" Title=`"Copy table to clipboard as HTML`" src=`"$htmlButton`" onclick=`"copyToClipboardHtml(document.getElementById('{0}'))`"/>&nbsp;<input type=`"image`" Title=`"Copy table to clipboard as text`" src=`"$textButton`" onclick=`"copyToClipboardText(document.getElementById('{0}'))`"/></div>" -f $CopyToClipBoardGuid
         }
         elseif($null -ne $Finding.InputObject -and $OutputFormat -eq [SPDiagnostics.OutputFormat]::TEXT)
         {
@@ -881,6 +884,10 @@ function Get-DiagnosticErrorFindings {
 }
 
 #endregion
+
+## setting 'script servers varaible here and replacing it in 13 locations where we call 'get spserver'''
+
+$script:servers = Get-SPServer
 
 #region SPVersion Function
 function Get-SPVersion
@@ -1430,7 +1437,7 @@ function Get-FarmAVSettings
 
 function Get-SPDiagnosticsSqlAlias
 {
-    $servers = Get-SPServer | Where-Object{$_.Role -ne [Microsoft.SharePoint.Administration.SPServerRole]::Invalid}
+    $servers = $script:servers | Where-Object {$_.role -ne "Invalid"}
     $serverAliases = @()
     foreach($server in $servers)
     {
@@ -1461,7 +1468,7 @@ function Get-SPDiagnosticsSqlAlias
 function Get-SPDiagnosticServersInFarm
 {
     $serverColl = @()
-    $servers = (Get-SPServer | Sort-Object Role, Name)
+    $servers = ($script:servers | Sort-Object Role, Name)
     $spProduct = Get-SPProduct
     foreach($svr in $servers)
     {
@@ -1622,7 +1629,7 @@ function Get-SPDiagnosticsOsInfo
         }
         $model = [string]$sysInfo.Model
         $procCount = [string]@($procs).Count
-        $coreCount = [string]$procs[0].NumberOfCores
+        $coreCount = [string]$procs[0].NumberOfLogicalProcessors
         $totalRAM = "$([string]([System.Math]::Round($sysInfo.TotalPhysicalMemory/1gb,2))) GB"
     }
     catch
@@ -1735,7 +1742,7 @@ function Get-MissingPatches
 
     try
     {
-        $SPServers =  get-spserver | Where-Object {$_.role -ne "invalid"}
+        $SPServers =  $script:servers | Where-Object {$_.role -ne "invalid"}
         $ServerNum = $SPServers.Count
 
 
@@ -1830,7 +1837,7 @@ function Get-WindowsSerivcesOnServer
     }
 
     $WServiceInfos=@()
-    $servers = get-spserver | Where-Object {$_.role -ne "Invalid"}
+    $servers = $script:servers | Where-Object {$_.role -ne "Invalid"}
     foreach ($server in $servers)
     {
         $Services =  Get-WmiObject "Win32_Service" -ComputerName $server.name | Where-Object {$_.name -in $ServicesList}
@@ -1898,7 +1905,7 @@ function Get-HDDiskStatistics
 {
     $ServerHarddDisks = New-DiagnosticFinding -Name "Diskusage on Servers" -InputObject $null -Format Table
     $DiskUsageInfos=@()
-    $servers = get-spserver | Where-Object {$_.role -ne "Invalid"}
+    $servers = $script:servers | Where-Object {$_.role -ne "Invalid"}
     foreach ($server in $servers)
     {
         $ServerDiskInfos = get-wmiObject -query "select * from win32_LogicalDisk where DriveType=3" -ComputerName $Server.Name
@@ -1933,7 +1940,7 @@ function Get-ServerLocalGroupMemberships
 {
     $ServerLocalGroupMembers = New-DiagnosticFinding -Name "Local group members on servers" -InputObject $null -Format Table
 
-    $spServers = get-spserver | where-object {$_.role -ne "Invalid"}
+    $spServers = $script:servers | where-object {$_.role -ne "Invalid"}
     $groups =@("WSS_WPG","WSS_ADMIN_WPG","WSS_RESTRICTED_WPG_V4","Administrators","IIS_IUSRS")
     $LocalGorupMemberShips=@()
 
@@ -2005,7 +2012,7 @@ function Get-AllSpServices
     {
         if ($spso.'NeedsUpgrade IncludeChildren'  -or $spso.NeedsUpgrade)
         {
-            $AllSPServicesfinding.WarningMessage +="The service " + $spso.Displayname + " requires an update."
+            $AllSPServicesfinding.WarningMessage +="The service '" + $spso.Displayname + "' requires an update."
             $AllSPServicesfinding.Severity =[SPDiagnostics.Severity]::Warning
         }
     }
@@ -2014,7 +2021,7 @@ function Get-AllSpServices
     {
         if ($spso.'Compliant With MinRole' -eq $false)
         {
-            $AllSPServicesfinding.WarningMessage +="The service " + $spso.Displayname + " is not fully MinRole compliant."
+            $AllSPServicesfinding.WarningMessage +="The service '" + $spso.Displayname + "' is not fully MinRole compliant."
             $AllSPServicesfinding.Severity =[SPDiagnostics.Severity]::Warning
         }
     }
@@ -2029,7 +2036,7 @@ function Get-SPDiagnosticServicesOnServer
     Param()
     $finding = New-DiagnosticFinding -Name "Service Instances on Server(s)" -InputObject $null -Description "This should be equivalent to what we see in Central Admin on page '/_admin/FarmServices.aspx'<br/>" -Format Table
     $runningServices = @()
-    $servers = Get-SPServer | Where-Object{$_.Role -ne [Microsoft.SharePoint.Administration.SPServerRole]::Invalid}
+    $servers = $script:servers | Where-Object{$_.Role -ne [Microsoft.SharePoint.Administration.SPServerRole]::Invalid}
     foreach($server in $servers)
     {
         $services = $server.ServiceInstances | Where-Object{$_.Status -ne [Microsoft.SharePoint.Administration.SPObjectStatus]::Disabled}
@@ -2526,7 +2533,7 @@ Function Get-ScriptExecutionInfo
     $execInfo = New-Object psobject
     $execInfo | Add-Member -MemberType NoteProperty -Name ScriptVersion -Value $ScriptVersion
     $execInfo | Add-Member -MemberType NoteProperty -Name Computer -Value (Obfuscate $env:COMPUTERNAME -type  "computer")
-    $execInfo | Add-Member -MemberType NoteProperty -Name ServerRole -Value (get-spserver -Identity $env:Computername).Role
+    $execInfo | Add-Member -MemberType NoteProperty -Name ServerRole -Value (Get-SPServer -Identity $env:Computername).Role
 
     $execInfo | Add-Member -MemberType NoteProperty -Name "DataCollection Start" $Script:RunStartTime
     $execInfo | Add-Member -MemberType NoteProperty -Name Time -Value (Get-Date)
@@ -2574,7 +2581,7 @@ function Get-SPDiagnosticTimerJobHistoryFinding
 {
     [cmdletbinding()]
     Param()
-    $servers = Get-SPServer | Where-Object{$_.Role -ne "Invalid"}
+    $servers = $script:servers | Where-Object{$_.Role -ne "Invalid"}
     $warningRowCount = 2000000*$servers.Count
     $configDb = Get-SPDatabase  | Where-Object{$_.TypeName -match "Configuration Database"}
     $result = Invoke-SPSqlCommand -spDatabase $configDb -query "select count(1) from dbo.TimerJobHistory with(nolock)" -ErrorAction SilentlyContinue
@@ -3940,7 +3947,7 @@ function Get-SPDiagnosticsFarmSolutionsFinding
     {
         $webAppCount+=$webService.WebApplications.Count
     }
-    $globalDeployServers = Get-SPServer | Where-Object{$_.Role -ne [Microsoft.SharePoint.Administration.SPServerRole]::Invalid}
+    $globalDeployServers = $script:servers | Where-Object{$_.Role -ne [Microsoft.SharePoint.Administration.SPServerRole]::Invalid}
     $wfeDeployServers = @()
     foreach($server in $globalDeployServers)
     {
@@ -5870,7 +5877,7 @@ function Get-SPDiagnosticsSSASearchService
     #Check if SearchServers are dedicated SearchRole, SingleServer
     $RoleDedicatedSearch=$false
     $RoleSingleServer=$false
-    foreach ($s in get-spserver)
+    foreach ($s in $script:servers)
     {
         if ($s.role -eq "Search")
         {
@@ -8732,7 +8739,7 @@ function Get-SPDiagnosticsTlsFinding
         Default {}
     }
 
-    $servers = Get-SPServer | Where-Object {$_.Role -ne [Microsoft.SharePoint.Administration.SPServerRole]::Invalid}
+    $servers = $script:servers | Where-Object {$_.Role -ne [Microsoft.SharePoint.Administration.SPServerRole]::Invalid}
     foreach($server in $servers)
     {
         try 
@@ -9239,7 +9246,7 @@ function Get-ContentDeploymentFindings
 #region Network Latency
 Function Get-SPDiagnosticFarmNetworkLatency()
 {
-    $servers = (Get-SPServer | select-Object Name).Name
+    $servers = $script:servers.Name
     $NetworkLatency = @()
     $NetworkLatencyFinding = New-DiagnosticFinding -Name "Intra Farm Network Latency" -InputObject $null -Format Table
     if ($servers.count -eq 1)
@@ -9479,7 +9486,7 @@ function Get-DBInfosFinding ($DBServer)
     foreach ($DBInfoSQL in $DBInfosSQL)
     {
         $DBInfo = new-object PSObject
-        #$DBInfo | add-member -memberType NoteProperty -name "ID" -Value $DBInfoSQL.Database_ID
+        $DBInfo | add-member -memberType NoteProperty -name "DB_ID" -Value $DBInfoSQL.Database_ID
         $DBInfo | add-member -memberType NoteProperty -name "Database Name" -Value $(Obfuscate $DBInfoSQL.Name "database")
         $DBInfo | add-member -memberType NoteProperty -name "Compatiblity Level" -Value $DBInfoSQL.Compatibility_Level
         $DBInfo | add-member -memberType NoteProperty -name "Collation" -Value $DBInfoSQL.Collation_name
@@ -10359,7 +10366,7 @@ function main
     if($UseEncodedServerId)
     {
         Write-Host "Generating Hashes for Servernames and Addresses"
-        foreach($server in Get-SPServer)
+        foreach($server in $script:servers)
         {
             $diagnosticContent = $diagnosticContent.Replace($server.Address,$server.EncodedServerId)
             $diagnosticContent = $diagnosticContent.Replace($server.Name,$server.EncodedServerId)
