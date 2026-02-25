@@ -8,7 +8,7 @@ Collect Information from SharePoint Farm(s)
 
 <br/>  .\Get-SPFarmInfo.ps1
 # Releases
-## SharePoint Server 2016+
+## SPSE | SP 2019 | SP 2016
 For the latest release, go to: [https://github.com/acasilla/SPFarmInfo/releases/latest](https://github.com/acasilla/SPFarmInfo/releases/latest)
 
 
