@@ -9,15 +9,15 @@
         + Authentication methods and configurations
         + Only collects data, makes no changes
 .EXAMPLE
-    PS C:\> Get-SPFarmInfo.PS1 -SkipSearchHealthCheck -TLS 
-    This executes the Get-SPFArmInfo data collection process without the exhaustive search health check and performs additional TLS collect
+    PS C:\> Get-SPFarmInfo.PS1 -Performance
+    This executes the Get-SPFArmInfo standard data collection process and performs additional "Performance" data collection
 .INPUTS
     None at this time
 .OUTPUTS
     An html report documenting findings.
 .NOTES
     General notes
-    Version 3.x
+    Version 4.x
 
 DISCLAIMER
  This script is not supported under any Microsoft standard support program or service. 
@@ -95,7 +95,7 @@ if([System.IntPtr]::Size -lt 8)
     exit
 }
 
-$ScriptVersion="3.9.2606.2800"
+$ScriptVersion="4.1.2608.1600"
 $script:PreviousFindingTime= Get-Date
 
 # Retrieve parameters information
@@ -312,7 +312,7 @@ function New-DiagnosticFinding
     }
 
     #Write-Host ("{0} Generating finding -- {1}" -f $findingTime, $Name)
-    Write-Host ("Generating finding -- {0}" -f $Name)
+    Write-Host ("Generated finding -- {0}" -f $Name)
 
     $finding = New-Object SPDiagnostics.Finding
     $finding.Name = $Name
@@ -1204,7 +1204,7 @@ $enhanceTablesJs = @"
         $html+="<div id=`"topInfo`">"
         $html+="<h1>SPFarmInfo - {0} [{1}]</h1>" -f $build, [Microsoft.SharePoint.Administration.SPFarm]::Local.BuildVersion.ToString()
         $html+="<p style=`"font-style: italic;`">Generated at {0} UTC</p>" -f [datetime]::UtcNow.ToString("MM/dd/yyyy hh:mm:ss tt")
-        $html+="<p style=`"font-style: italic;`">ScriptVersion: {0} (Published on 06-28-2026)</p>" -f $ScriptVersion 
+        $html+="<p style=`"font-style: italic;`">ScriptVersion: {0} (Published on 08-16-2026)</p>" -f $ScriptVersion 
         $html+="<div class=`"summary`">"
         $html+="<div class=`"summary-card critical`"><div class=`"count`">{0}</div><div class=`"label`">Critical</div></div>" -f $criticalFindings.Count
         $html+="<div class=`"summary-card warning`"><div class=`"count`">{0}</div><div class=`"label`">Warnings</div></div>" -f $warningFindings.Count
@@ -1278,7 +1278,7 @@ $enhanceTablesJs = @"
         {
             'HTML'
             {
-                $html+="<div class=`"review-section warning`"><details open=`"true`"><summary class=`"warning heading`">Review Items</summary>"
+                $html+="<div class=`"review-section warning`"><details><summary class=`"warning heading`">Review Items</summary>"
                 $html+="<div style=`"padding-left: 30px`">"
             }
             'TEXT'
@@ -1391,6 +1391,36 @@ $enhanceTablesJs = @"
         {
             $html+="#########################################################################################`r`n"
         }
+    }
+
+    # Decode the ~~~BR~~~ line-break sentinel used by findings that stack multiple values within a single table cell
+    # ~~~POLICYSTART~~~ / ~~~POLICYEND~~~ wrap a label (e.g. a policy name) so it renders bold in HTML output.
+    # ~~~SETSTART~~~ / ~~~SETEND~~~ wrap a value (e.g. a security setting) so it renders in a light-blue color in HTML output.
+    # ~~~PILLGOOD~~~ / ~~~PILLBAD~~~ / ~~~PILLWARN~~~ ... ~~~PILLEND~~~ wrap a value in a colored status pill (green/red/amber) in HTML output.
+    # These sentinels are used because ConvertTo-Html encodes raw markup; replacing them after conversion keeps the styling intact.
+    if($OutputFormat -eq [SPDiagnostics.OutputFormat]::HTML)
+    {
+        $html = $html.Replace('~~~BR~~~','<br/>')
+        $html = $html.Replace('~~~POLICYSTART~~~','<strong>')
+        $html = $html.Replace('~~~POLICYEND~~~','</strong>')
+        $html = $html.Replace('~~~SETSTART~~~','<span style="color:#9ecbff;padding-left:1.6em">')
+        $html = $html.Replace('~~~SETEND~~~','</span>')
+        $html = $html.Replace('~~~PILLGOOD~~~','<span style="background:#1a7f37;color:#fff;padding:1px 8px;border-radius:10px;font-size:12px;display:inline-block">')
+        $html = $html.Replace('~~~PILLBAD~~~','<span style="background:#b62324;color:#fff;padding:1px 8px;border-radius:10px;font-size:12px;display:inline-block">')
+        $html = $html.Replace('~~~PILLWARN~~~','<span style="background:#9e6a03;color:#fff;padding:1px 8px;border-radius:10px;font-size:12px;display:inline-block">')
+        $html = $html.Replace('~~~PILLEND~~~','</span>')
+    }
+    else
+    {
+        $html = $html.Replace('~~~BR~~~',' | ')
+        $html = $html.Replace('~~~POLICYSTART~~~','')
+        $html = $html.Replace('~~~POLICYEND~~~','')
+        $html = $html.Replace('~~~SETSTART~~~','')
+        $html = $html.Replace('~~~SETEND~~~','')
+        $html = $html.Replace('~~~PILLGOOD~~~','')
+        $html = $html.Replace('~~~PILLBAD~~~','')
+        $html = $html.Replace('~~~PILLWARN~~~','')
+        $html = $html.Replace('~~~PILLEND~~~','')
     }
 
     return $html
@@ -1552,97 +1582,58 @@ function Get-ServicingPolicy ($ServicingPolicies)
     return $false
 }
 
+function Get-SecondTuesday ($Year, $Month)
+{
+    # Second Tuesday of the given month — the SPSE PU support-end convention.
+    $first = [DateTime]::new($Year, $Month, 1)
+    $daysUntilTuesday = ([int][System.DayOfWeek]::Tuesday - [int]$first.DayOfWeek + 7) % 7
+    return $first.AddDays($daysUntilTuesday + 7)
+}
+
 Function Get-SPSESupportServicePolicy
 {
-    #ToDo:Adjust values after every monthly CU of SPSE
-    $ServiceingPolicies = @()
-    # latest version
-    #2024/04/09
-    #$ServicingPolicy = new-Object psobject
-    #$ServicingPolicy | add-member -MemberType NoteProperty -Name SupportEndDate -value (New-Object DateTime 2024,04,09)
-    #$ServicingPolicy | Add-Member -MemberType NoteProperty -name BuildVersionMin -value "16.0.15601.20478"
-    #$ServiceingPolicies += $ServicingPolicy
+    <#
+        SharePoint Server Subscription Edition servicing policy:
+        each Public Update (PU) is supported for one year from its release date,
+        ending on the second Tuesday of the same month in the following year.
+        Ref: https://learn.microsoft.com/en-us/sharepoint/product-servicing-policy/updated-product-servicing-policy-for-sharepoint-server-se
 
-    #December 2024 PU
-    $ServiceingPolicies += [PSCustomObject]@{BuildVersionMin="16.0.17928.20290";SupportEndDate=([DateTime]::new(2025,12,10))}
+        Dynamic model (no per-CU table to maintain):
+          Anchor = a known PU build and its release month/year.
+            - Farm build newer than the anchor  -> supported (newer than anything tracked; never false-alarm).
+            - Farm build <= anchor AND today is past the anchor's 1-year mark -> out of policy (certain).
+          Bump the anchor below occasionally (a few times a year); no monthly edits required.
+    #>
 
-    #November 2024 PU
-    $ServiceingPolicies += [PSCustomObject]@{BuildVersionMin="16.0.17928.20238";SupportEndDate=([DateTime]::new(2025,11,12))}
+    # ---- Anchor: update occasionally (set to the oldest build you consider "still supported") ---- #
+    $anchorBuild        = [version]"16.0.18526.20518"   # August 2025 PU
+    $anchorReleaseYear  = 2025
+    $anchorReleaseMonth = 08 
+    # ---------------------------------------------------------------------------------------------
 
-    #October 2024 PU
-    $ServiceingPolicies += [PSCustomObject]@{BuildVersionMin="16.0.17928.20162";SupportEndDate=([DateTime]::new(2025,10,08))}
+    $farmVersion = (Get-SPFarm).BuildVersion                 # authoritative farm build (fixes prior undefined $farm bug)
+    $farmBuild   = [version]$farmVersion.ToString()
 
-    #September 2024 PU
-    $ServiceingPolicies += [PSCustomObject]@{BuildVersionMin="16.0.17928.20086";SupportEndDate=([DateTime]::new(2025,09,10))}
-
-    #August 2024 PU
-    $ServiceingPolicies += [PSCustomObject]@{BuildVersionMin="16.0.17328.20510";SupportEndDate=([DateTime]::new(2025,08,13))}
-
-    #July 2024 PU
-    $ServiceingPolicies += [PSCustomObject]@{BuildVersionMin="16.0.17328.20424";SupportEndDate=([DateTime]::new(2025,07,09))}
-
-    #June 2024 PU
-    $ServiceingPolicies += [PSCustomObject]@{BuildVersionMin="16.0.17328.20362";SupportEndDate=([DateTime]::new(2025,06,11))}
-
-    #May 2024 PU
-    $ServiceingPolicies += [PSCustomObject]@{BuildVersionMin="16.0.17328.20292";SupportEndDate=([DateTime]::new(2025,05,14))}
-
-    #April 2024 PU
-    $ServiceingPolicies += [PSCustomObject]@{BuildVersionMin="16.0.17328.20246";SupportEndDate=([DateTime]::new(2025,04,09))}
-
-    #March 2024 PU
-    $ServiceingPolicies += [PSCustomObject]@{BuildVersionMin="16.0.17328.20136";SupportEndDate=([DateTime]::new(2025,03,12))}
-
-    #February 2024 PU
-    $ServiceingPolicies += [PSCustomObject]@{BuildVersionMin="16.0.16731.20526";SupportEndDate=([DateTime]::new(2025,02,13))}
-
-    #January 2024 PU
-    $ServiceingPolicies += [PSCustomObject]@{BuildVersionMin="16.0.16731.20462";SupportEndDate=([DateTime]::new(2025,01,09))}
-
-    #December 2023 PU
-    $ServiceingPolicies += [PSCustomObject]@{BuildVersionMin="16.0.16731.20402";SupportEndDate=([DateTime]::new(2024,12,12))}
-
-    #November 2023 PU
-    $ServiceingPolicies += [PSCustomObject]@{BuildVersionMin="16.0.16731.20350";SupportEndDate=([DateTime]::new(2024,11,14))}
-
-    #October 2023 PU
-    $ServiceingPolicies += [PSCustomObject]@{BuildVersionMin="16.0.16731.20252";SupportEndDate=([DateTime]::new(2024,10,10))}
-
-    #September 2023 PU
-    $ServiceingPolicies += [PSCustomObject]@{BuildVersionMin="16.0.16731.20180";SupportEndDate=([DateTime]::new(2024,09,12))}
-
-    #August 2023 PU
-    $ServiceingPolicies += [PSCustomObject]@{BuildVersionMin="16.0.16130.20684";SupportEndDate=([DateTime]::new(2024,08,08))}
-
-    #July 2023 PU
-    $ServiceingPolicies += [PSCustomObject]@{BuildVersionMin="16.0.16130.20642";SupportEndDate=([DateTime]::new(2024,07,11))}
-
-    #June 2023 PU
-    $ServiceingPolicies += [PSCustomObject]@{BuildVersionMin="16.0.16130.20548";SupportEndDate=([DateTime]::new(2024,06,11))}
-
-    #all older builds are unsupported now, removed them
-    
-    $ServicePolicyFinding = New-DiagnosticFinding -Name "Sharepoint SE Product Servicing Policy" -InputObject $null -Format List
-
-    #Bug 570: account for newer builds if static list is not maintained.
-    [version]$newestServicingPolicyVersion = ($ServiceingPolicies  | Select-Object @{l="version";e={[version]$_.BuildVersionMin}} | Sort-Object Version -Descending)[0].version
-    if (Get-ServicingPolicy  $ServiceingPolicies)
+    # Newer than anything this script knows about -> treat as supported.
+    if ($farmBuild -gt $anchorBuild)
     {
         return
-        #$ServicePolicyFinding.Description +="SharePoint farm is in Product Servicing Policy"
     }
-    elseif ($farm.BuildVersion -gt $newestServicingPolicyVersion)
+
+    # Support end for the anchor build's release month, one year later (2nd Tuesday).
+    $anchorSupportEnd = Get-SecondTuesday -Year ($anchorReleaseYear + 1) -Month $anchorReleaseMonth
+
+    # Any build <= anchor ends no later than the anchor; if we're past that date it is certainly unsupported.
+    if ((Get-Date) -lt $anchorSupportEnd)
     {
-        #farm version is newer than the highest build tracked by the script, don't report it here.
         return
     }
-    else
-    {
-        $ServicePolicyFinding.WarningMessage += "This Version of SharePoint Subsription Edition is no longer supported. You must install a later Cumulative Update to be fully supported again."
-        $ServicePolicyFinding.ReferenceLink+="https://learn.microsoft.com/en-us/sharepoint/product-servicing-policy/updated-product-servicing-policy-for-sharepoint-server-se"
-        $ServicePolicyFinding.Severity = [SPDiagnostics.Severity]::Critical
-    }
-    return $ServicePolicyFinding 
+
+    $ServicePolicyFinding = New-DiagnosticFinding -Name "SharePoint SE Product Servicing Policy" -InputObject $null -Format List
+    $ServicePolicyFinding.WarningMessage += " - This build of SharePoint Server Subscription Edition ($($farmVersion.ToString())) is no longer within the product servicing policy.</br> - Each Public Update is supported for one year from its release date. </br> - Please install a recent Public Update to remain fully supported."
+    $ServicePolicyFinding.ReferenceLink  += "https://learn.microsoft.com/en-us/sharepoint/product-servicing-policy/updated-product-servicing-policy-for-sharepoint-server-se"
+    $ServicePolicyFinding.Severity = [SPDiagnostics.Severity]::Warning
+    return $ServicePolicyFinding
 }
 
 Function Get-SP2019SupportServicePolicy
@@ -1729,14 +1720,18 @@ function Get-SPDiagnosticSupportDateFinding
         $endOfSupportNotificationLink = $(New-Object System.Uri "https://go.microsoft.com/fwlink/?LinkId=2198657").AbsoluteUri
         $mainstreamSupportDate = [System.TimeZoneInfo]::ConvertTimeToUtc((New-Object DateTime 2199, 12, 1), [System.TimeZoneInfo]::FindSystemTimeZoneById("Pacific Standard Time"));
         $endOfSupportDate = [System.TimeZoneInfo]::ConvertTimeToUtc((New-Object DateTime 2199, 12, 1), [System.TimeZoneInfo]::FindSystemTimeZoneById("Pacific Standard Time"));
-        $supportDateFinding.ChildFindings.add((Get-SPSESupportServicePolicy))
+        $spseServicePolicy = Get-SPSESupportServicePolicy
+        if ($null -ne $spseServicePolicy)
+        {
+            $supportDateFinding.ChildFindings.add($spseServicePolicy)
+        }
     }
     elseif($build -eq "2019")
     {
         $endOfSupportNotificationLink = $(New-Object System.Uri "https://go.microsoft.com/fwlink/?LinkId=2198656").AbsoluteUri
         $mainstreamSupportDate = [System.TimeZoneInfo]::ConvertTimeToUtc((New-Object DateTime 2024, 1, 9), [System.TimeZoneInfo]::FindSystemTimeZoneById("Pacific Standard Time"));
         $endOfSupportDate = [System.TimeZoneInfo]::ConvertTimeToUtc((New-Object DateTime 2026, 7,14), [System.TimeZoneInfo]::FindSystemTimeZoneById("Pacific Standard Time"));
-        $supportDateFinding.ChildFindings.add((Get-SP2019SupportServicePolicy))
+        #$supportDateFinding.ChildFindings.add((Get-SP2019SupportServicePolicy))
 
     }
     elseIf($build -eq "2016")
@@ -1744,7 +1739,7 @@ function Get-SPDiagnosticSupportDateFinding
         $endOfSupportNotificationLink = $(New-Object System.Uri  "https://go.microsoft.com/fwlink/?LinkId=2198655").AbsoluteUri
         $mainstreamSupportDate = [System.TimeZoneInfo]::ConvertTimeToUtc((New-Object DateTime 2021, 7, 13), [System.TimeZoneInfo]::FindSystemTimeZoneById("Pacific Standard Time"));
         $endOfSupportDate = [System.TimeZoneInfo]::ConvertTimeToUtc((New-Object DateTime 2026, 7, 14), [System.TimeZoneInfo]::FindSystemTimeZoneById("Pacific Standard Time"));
-        $supportDateFinding.ChildFindings.add((Get-SP2016SupportServicePolicy))
+        #$supportDateFinding.ChildFindings.add((Get-SP2016SupportServicePolicy))
     }
     elseif($build -eq "2013")
     {
@@ -1787,9 +1782,7 @@ function Get-SPDiagnosticSupportDateFinding
         {
             $endOfSupportSeverityLevel = "Alert";
             $supportDateFinding.Severity = [SPDiagnostics.Severity]::Critical
-            $supportDateFinding.WarningMessage += "This version of SharePoint Server is no longer supported."
-            $supportDateFinding.WarningMessage += "Microsoft does not accept requests for fixes, design changes, or new features when a product is no longer supported."
-            $supportDateFinding.WarningMessage += "Microsoft will not release any updates for this product, not even 'Security' related updates."   
+            $supportDateFinding.WarningMessage += "This version of SharePoint Server is no longer supported.</br> Microsoft does not accept requests for fixes, design changes, or new features when a product is no longer supported.</br> Microsoft will not release any updates for this product, not even 'Security' related updates."   
 
         }
         elseif([System.DateTime]::Compare($currentDate, $endOfSupportDateInfo) -gt 0)
@@ -1804,16 +1797,12 @@ function Get-SPDiagnosticSupportDateFinding
             {
                 $endOfSupportSeverityLevel = "Warning";
                 $supportDateFinding.Severity = [SPDiagnostics.Severity]::Warning
-                $supportDateFinding.WarningMessage += "This version of SharePoint Server is nearing the end of 'Mainstream' support."
-                $supportDateFinding.WarningMessage += "Microsoft does not accept requests for fixes, design changes, or new features during the 'Extended Support' phase."
-                $supportDateFinding.WarningMessage += "Microsoft will only release 'Security' related updates in the patching cycle." }
+                $supportDateFinding.WarningMessage += "This version of SharePoint Server is nearing the end of 'Mainstream' support.</br> Microsoft does not accept requests for fixes, design changes, or new features during the 'Extended Support' phase.</br> Microsoft will only release 'Security' related updates in the patching cycle." }
             else
             {
                 $endOfSupportSeverityLevel = "Alert";
                 $supportDateFinding.Severity = [SPDiagnostics.Severity]::Critical
-                $supportDateFinding.WarningMessage += "This version of SharePoint Server is in 'Extended' Support."
-                $supportDateFinding.WarningMessage += "Microsoft does not accept requests for fixes, design changes, or new features during the 'Extended Support' phase."
-                $supportDateFinding.WarningMessage += "Microsoft will only release 'Security' related updates in the patching cycle."}   
+                $supportDateFinding.WarningMessage += "This version of SharePoint Server is in 'Extended' Support.</br> Microsoft does not accept requests for fixes, design changes, or new features during the 'Extended Support' phase.</br> Microsoft will only release 'Security' related updates in the patching cycle."}   
         }
         else
         {
@@ -1829,17 +1818,13 @@ function Get-SPDiagnosticSupportDateFinding
                 {
                     $endOfSupportSeverityLevel = "Warning";
                     $supportDateFinding.Severity = [SPDiagnostics.Severity]::Warning
-                    $supportDateFinding.WarningMessage += "This version of SharePoint Server is nearing the end of 'Mainstream' support."
-                    $supportDateFinding.WarningMessage += "Microsoft does not accept requests for fixes, design changes, or new features during the 'Extended Support' Phase."
-                    $supportDateFinding.WarningMessage += "Microsoft will only release 'Security' related updates in the patching cycle."
+                    $supportDateFinding.WarningMessage += "This version of SharePoint Server is nearing the end of 'Mainstream' support.</br> Microsoft does not accept requests for fixes, design changes, or new features during the 'Extended Support' phase.</br> Microsoft will only release 'Security' related updates in the patching cycle."
                 }
                 else
                 {
                     $endOfSupportSeverityLevel = "Alert";
                     $supportDateFinding.Severity = [SPDiagnostics.Severity]::Critical
-                    $supportDateFinding.WarningMessage += "This version of SharePoint Server is in 'Extended' Support."
-                    $supportDateFinding.WarningMessage += "Microsoft does not accept requests for fixes, design changes, or new features during the 'Extended Support' Phase."
-                    $supportDateFinding.WarningMessage += "Microsoft will only release 'Security' related updates in the patching cycle."
+                    $supportDateFinding.WarningMessage += "This version of SharePoint Server is in 'Extended' Support.</br> Microsoft does not accept requests for fixes, design changes, or new features during the 'Extended Support' phase.</br> Microsoft will only release 'Security' related updates in the patching cycle."
                 }   
             }
         }
@@ -1867,10 +1852,15 @@ Function Get-SPDiagnosticFarmFindings
         $farmFindings.ChildFindings.Add((Get-FarmUpdateHistory))
         $farmFindings.ChildFindings.Add((Get-ConfigDbVersionsTable))
         $farmFindings.ChildFindings.Add((Get-SPUpgradeSessionsFinding))
+        #Farm Services finding - only show when one or more services are not "Online"
+        $farmServicesFinding = Get-SPDiagnosticFarmServicesFinding
+        if($null -ne $farmServicesFinding)
+        {
+            $farmFindings.ChildFindings.Add(($farmServicesFinding))
+        }
         $farmFindings.ChildFindings.Add((Get-SPDiagnosticServersInFarm))
         $farmFindings.ChildFindings.Add((Get-SPDiagnosticSQLFindings))
         $farmFindings.ChildFindings.Add((Get-SPManagedAcountsWithPwdProps))
-        $farmFindings.ChildFindings.Add((Get-AllSpServices))
     
     # Task 532: Remove farm admins finding
     #$farmFindings.ChildFindings.Add((Get-FarmAdmins))  
@@ -1892,7 +1882,6 @@ Function Get-SPDiagnosticFarmFindings
     {
         $farmFindings.ChildFindings.Add(($timerAndAdminSvcFinding))
     }
-
 
     $farmFindings.ChildFindings.Add((Get-SPDiagnosticHealthAnalyzerFinding))
     # Moving this finding as a child finding to "Timer Information"
@@ -1944,7 +1933,7 @@ function Get-SPConfigurationDatabase
     }
     
     # Task 521: Remove reliance on English named objects
-    $script:configDb = Get-SPDatabase  | Where-Object{$_.GetType().FullName -eq "Microsoft.SharePoint.Administration.SPConfigurationDatabase"}
+    $script:configDb = $script:spDatabases  | Where-Object{$_.GetType().FullName -eq "Microsoft.SharePoint.Administration.SPConfigurationDatabase"}
     return $script:configDb
 }
 
@@ -1975,15 +1964,13 @@ function Get-SPDiagnosticFarmBuildInfo
         ConfigDbSql = $($configDb.ServiceInstance.Server.Address)
         ConfigDbInstance = $($configDb.ServiceInstance.Instance)
     }
-    $finding = New-DiagnosticFinding -Name "Farm Info" -Description "Farm build, ULS Location, and config db" -InputObject $retObj -Format List -Expand 
+    $finding = New-DiagnosticFinding -Name "Farm Info" -Description "Farm build, ULS Location, and config db" -InputObject $retObj -Format List
 
     if($countOfVerboseEx -gt 0 -or $countOfVerboseEx -gt 0 -or $countOfVerboseEvents)
     {
         $finding.Severity = [SPDiagnostics.Severity]::Warning
         $finding.Severity = [SPDiagnostics.Severity]::Warning
-        $finding.WarningMessage = "TraceSeverity is set to 'VerboseEx' on $countOfVerboseEx LogLevel(s). This may cause performance issues." 
-        $finding.WarningMessage += "If this loggging is not necessary, reset the logging to default either from 'Central Administration > Monitoring > Configur Diagnostic Logging'"
-        $finding.WarningMessage += "or by running the 'Clear-SPLogLevel' command from the SharePoint management shell."
+        $finding.WarningMessage = "TraceSeverity is set to 'VerboseEx' on $countOfVerboseEx LogLevel(s). This may cause performance issues. </br> If this logging is not necessary, reset the logging to default either from 'Central Administration > Monitoring > Configur Diagnostic Logging' </br> OR by running the 'Clear-SPLogLevel' command from the SharePoint management shell."
     }
     $Finding.ChildFindings.Add((Get-SPDiagnosticsSideBySidePathcingFinding))
     return $finding
@@ -2057,7 +2044,20 @@ function Get-FarmUpdateHistory
         }
     }
 
-    $FarmUpdateHistory.InputObject = $installedUpdates | Select-Object @{l="ServerName"; e={$_.ServerName}}, PatchableUnitName, Version, PatchUrl
+    # Consolidate to one row per server (server shown once); stack each patch's columns in parallel
+    # using the ~~~BR~~~ sentinel (<br/> in HTML, " | " in text), matching "Service Instances on Server(s)".
+    $updatesReport = $installedUpdates | Select-Object @{l="ServerName"; e={$_.ServerName}}, PatchableUnitName, Version, PatchUrl
+    $groupedUpdates = @()
+    foreach($updGroup in ($updatesReport | Group-Object ServerName))
+    {
+        $groupedUpdates += [PSCustomObject]@{
+            ServerName        = $updGroup.Name
+            PatchableUnitName = (($updGroup.Group | ForEach-Object {$_.PatchableUnitName}) -join '~~~BR~~~')
+            Version           = (($updGroup.Group | ForEach-Object {$_.Version})           -join '~~~BR~~~')
+            PatchUrl          = (($updGroup.Group | ForEach-Object {$_.PatchUrl})          -join '~~~BR~~~')
+        }
+    }
+    $FarmUpdateHistory.InputObject = $groupedUpdates
 
     $orphanedSviQuery = "
         select count (1) as NumRows
@@ -2176,8 +2176,31 @@ WHERE [Properties] LIKE '<object type="Microsoft.SharePoint.Upgrade.SPUpgradeSes
     }
 
     $conn.Close()
-    $spUpgradeSessions = $spUpgradeSessions | Sort-Object -Property server, LastUpdatedTime
-    $spUpgradeSessionFinding.InputObject = $spUpgradeSessions
+    $spUpgradeSessions = @($spUpgradeSessions | Sort-Object -Property server, LastUpdatedTime)
+
+    # Consolidate to one row per server (server shown once); stack each session's columns in parallel
+    # using the ~~~BR~~~ sentinel (<br/> in HTML, " | " in text), matching "Installed Updates".
+    if ($spUpgradeSessions.Count -gt 0)
+    {
+        # Columns are built dynamically from the SPUpgradeSession XML, so derive them from the objects.
+        $stackColumns = $spUpgradeSessions[0].PSObject.Properties.Name | Where-Object {$_ -ne 'server'}
+
+        $groupedSessions = @()
+        foreach ($sessGroup in ($spUpgradeSessions | Group-Object server))
+        {
+            $row = [ordered]@{server = $sessGroup.Name}
+            foreach ($col in $stackColumns)
+            {
+                $row[$col] = (($sessGroup.Group | ForEach-Object {$_.$col}) -join '~~~BR~~~')
+            }
+            $groupedSessions += [PSCustomObject]$row
+        }
+        $spUpgradeSessionFinding.InputObject = $groupedSessions
+    }
+    else
+    {
+        $spUpgradeSessionFinding.InputObject = $spUpgradeSessions
+    }
 
     return $spUpgradeSessionFinding
 }
@@ -2227,7 +2250,7 @@ function Get-FarmAVSettings
         }
         if ($AVSettings.AllowQuarantinedFileDownload)
         {
-            $AVfinding.WarningMessage +="Users are allowed to download files that are quarantained by the SharePoint Virus scanner."
+            $AVfinding.WarningMessage +="Users are allowed to download files that are quarantined by the SharePoint Virus scanner."
             $AVfinding.Severity = [SPDiagnostics.Severity]::Warning
         }
         if (!$AVSettings.UploadScanEnabled)
@@ -2282,7 +2305,18 @@ function Get-SPDiagnosticsSqlAlias
     }
     if($serverAliases.Count -ge 1)
     {
-        return New-DiagnosticFinding -Name "Sql Aliases" -InputObject $serverAliases -Format Table -Description "SQL Server aliases that are currently configured in cliconfg"
+        # Consolidate to one row per server (server shown once); stack alias columns in parallel
+        # using the ~~~BR~~~ sentinel (<br/> in HTML, " | " in text), matching "Service Instances on Server(s)".
+        $groupedAliases = @()
+        foreach($aliasGroup in ($serverAliases | Group-Object Server))
+        {
+            $groupedAliases += [PSCustomObject]@{
+                Server           = $aliasGroup.Name
+                ServerAlias      = (($aliasGroup.Group | ForEach-Object {$_.ServerAlias})      -join '~~~BR~~~')
+                ConnectionString = (($aliasGroup.Group | ForEach-Object {$_.ConnectionString}) -join '~~~BR~~~')
+            }
+        }
+        return New-DiagnosticFinding -Name "Sql Aliases" -InputObject $groupedAliases -Format Table -Description "SQL Server aliases that are currently configured in cliconfg"
     }
 }
 
@@ -2350,7 +2384,7 @@ function Get-SPDiagnosticServersInFarm
          #}
     }
     
-    $finding = New-DiagnosticFinding -Name "Servers in Farm" -Severity Default -InputObject $serverColl -Format Table -Expand
+    $finding = New-DiagnosticFinding -Name "Servers in Farm" -Severity Default -InputObject $serverColl -Format Table
 
     #Servers in Custom Role
     $CustomRoleServers =@()
@@ -2364,11 +2398,12 @@ function Get-SPDiagnosticServersInFarm
     if ($CustomRoleServers.Count -gt 0)
     {
         $finding.Severity = [SPDiagnostics.Severity]::Informational
+        $customRoleNotes = "- This server role is typically used to run services that do not integrate with MinRole. The farm administrator has full control over which service instances can run on servers assigned to the Custom server role. </br>- MinRole will not attempt to manage servers assigned to this role."
         if ($CustomRoleServers.count -eq 1)
         {
-            $finding.WarningMessage += "The server $($($CustomRoleServers[0])) is running in MinRole: 'Custom'. </br>Servers in the 'Custom' MinRole are not self healing."
+            $finding.WarningMessage += "- The server $($($CustomRoleServers[0])) is running in MinRole: 'Custom'. </br>- Servers in the 'Custom' MinRole are not self healing. </br>$customRoleNotes"
         } else {
-            $finding.WarningMessage += "The servers '$($($CustomRoleServers -join ", "))' are running in MinRole: 'Custom'. </br>Servers in the 'Custom' MinRole are not self healing."
+            $finding.WarningMessage += "- The servers '$($($CustomRoleServers -join "', '"))' are running in MinRole: 'Custom'. </br>- Servers in the 'Custom' MinRole are not self healing. </br>$customRoleNotes" 
         }
         $finding.ReferenceLink +="https://learn.microsoft.com/en-us/SharePoint/install/overview-of-minrole-server-roles-in-sharepoint-server#how-does-minrole-improve-performance-and-reliability"
     } 
@@ -2419,14 +2454,26 @@ function Get-SPDiagnosticServersInFarm
         $finding.Expand = $false
     }
 
+    #Task: FIPS check. Only surfaces when FIPS is actually enabled on a server; otherwise the helper
+    #returns $null and the finding is omitted from the report entirely.
+    $fipsFinding = Get-SPDiagnosticFIPSFinding
+    if($null -ne $fipsFinding)
+    {
+        $finding.ChildFindings.Add($fipsFinding)
+    }
+
     $finding.ChildFindings.Add((Get-MissingPatches))
-
-    #Task 528: Move SQL Alias finding to SQL servers
-
     $finding.ChildFindings.Add((Get-WindowsSerivcesOnServer))
     $finding.ChildFindings.Add((Get-ServerLocalGroupMemberships))
     $finding.ChildFindings.Add((Get-UserRightsAssignments))
     $finding.ChildFindings.Add((Get-HDDiskStatistics))
+    #Task 528: Move SQL Alias finding to SQL servers
+    #Reverted: SQL Alias finding moved back under "Servers in Farm"
+    $sqlAliasFinding = Get-SPDiagnosticsSqlAlias
+    if($sqlAliasFinding.InputObject.Count -ge 1)
+    {
+        $finding.ChildFindings.Add($sqlAliasFinding)
+    }
     #Task 529: Move behind extended findings switch
     #Task 602: Removed extendedfindings switch
     #if($ExtendedFindings)
@@ -2448,6 +2495,74 @@ function Get-SPDiagnosticServersInFarm
     }
 
     return $finding
+}
+
+function Get-SPDiagnosticFIPSFinding
+{
+    # Checks whether FIPS (Federal Information Processing Standard) mode is enabled on any farm
+    # server by reading HKLM\SYSTEM\CurrentControlSet\Control\Lsa\FipsAlgorithmPolicy\Enabled via the
+    # remote registry (same approach used by the Kerberos findings). FIPS is NOT supported by
+    # SharePoint Server, so if it is enabled anywhere a Critical finding is raised. The finding is
+    # only returned when FIPS is detected on at least one server; otherwise $null is returned and the
+    # caller omits it, keeping it out of the report when it is not present.
+    $FipsKeyPath = "SYSTEM\CurrentControlSet\Control\Lsa\FipsAlgorithmPolicy"
+    $fipsServers = @()
+
+    $FarmServers = Get-SPServer | Where-Object { $_.Role -ne "Invalid" } | Sort-Object Name
+    foreach ($Server in $FarmServers)
+    {
+        $enabledValue = $null
+        $regKey = $null
+        try
+        {
+            $regKey = [Microsoft.Win32.RegistryKey]::OpenRemoteBaseKey(
+                [Microsoft.Win32.RegistryHive]::LocalMachine,
+                $Server.Name,
+                [Microsoft.Win32.RegistryView]::Registry64)
+
+            $subKey = $regKey.OpenSubKey($FipsKeyPath)
+            if ($subKey)
+            {
+                try   { $enabledValue = $subKey.GetValue("Enabled") }
+                finally { $subKey.Close() }
+            }
+        }
+        catch
+        {
+            # Unable to read the remote registry (e.g. the Remote Registry service is stopped or the
+            # server is unreachable). Skip this server rather than raising a false FIPS finding.
+            $enabledValue = $null
+        }
+        finally
+        {
+            if ($regKey) { $regKey.Close() }
+        }
+
+        if ($null -ne $enabledValue -and [int]$enabledValue -eq 1)
+        {
+            $fipsServers += [PSCustomObject]@{
+                Server         = $Server.Name
+                "FIPS Enabled" = "Yes"
+                "Registry Key" = "HKLM\$FipsKeyPath\Enabled = 1"
+            }
+        }
+    }
+
+    if ($fipsServers.Count -eq 0)
+    {
+        # FIPS is not enabled on any server, so there is nothing to report; omit the finding.
+        return $null
+    }
+
+    $fipsFinding = New-DiagnosticFinding -Name "FIPS Enabled (Not Supported)" -InputObject $fipsServers -Format Table
+
+    $fipsFinding.WarningMessage += " - FIPS (Federal Information Processing Standard) compliant algorithms are ENABLED on one or more servers. </br> - FIPS is NOT supported by SharePoint Server and can cause a wide range of failures (for example in search, User Profile synchronization, and workflows).</br> - To remediate, you <strong>must</strong> disable the 'System cryptography: Use FIPS compliant algorithms for encryption, hashing, and signing' security policy (or the FipsAlgorithmPolicy registry value) on the affected server(s) and restart them."
+    $fipsFinding.ReferenceLink += "https://learn.microsoft.com/en-us/sharepoint/security-for-sharepoint-server/federal-information-processing-standard-security-standards"
+    # Set Critical only after the WarningMessage is populated. New-DiagnosticFinding warns (and logs to
+    # the Script Execution finding) if a Warning/Critical finding is created with an empty message.
+    $fipsFinding.Severity = [SPDiagnostics.Severity]::Critical
+
+    return $fipsFinding
 }
 
 function Get-SPDiagnosticsOsInfo
@@ -2690,35 +2805,33 @@ function Get-WindowsSerivcesOnServer
     $servers = $script:servers | Where-Object {$_.role -ne "Invalid"}
     foreach ($server in $servers)
     {
-        $Services =  Get-WmiObject "Win32_Service" -ComputerName $server.name | Where-Object {$_.name -in $ServicesList} 
+        $Services =  Get-WmiObject "Win32_Service" -ComputerName $server.name | Where-Object {$_.name -in $ServicesList} | Sort-Object DisplayName
         foreach ($s in $services)
         {
             $wServiceInfo = new-object psobject
             $wServiceInfo | Add-Member -MemberType NoteProperty -Name "Computer" -value $($s.systemname)
-            $wServiceInfo | Add-Member -MemberType NoteProperty -Name "Service Account" -value $($s.startname)
-            $wServiceInfo | Add-Member -MemberType NoteProperty -Name "Name" -value $s.name
             $wServiceInfo | Add-Member -MemberType NoteProperty -Name "DisplayName" -value $s.displayname
+            $wServiceInfo | Add-Member -MemberType NoteProperty -Name "Name" -value $s.name
+            $wServiceInfo | Add-Member -MemberType NoteProperty -Name "Service Account" -value $($s.startname)
             $wServiceInfo | Add-Member -MemberType NoteProperty -Name "State" -value $s.state
             $wServiceInfo | Add-Member -MemberType NoteProperty -Name "StartMode" -value $s.startmode
-            #$wServiceInfo | Add-Member -MemberType NoteProperty -Name "DelayedAutoStart" -value $s.DelayedAutoStart
-            #$wServiceInfo | Add-Member -MemberType NoteProperty -Name "" -value $s.
             $WServiceInfos += $wServiceInfo
 
             # This needs to be tested with French/Spanish system. The term "runnning" could be translated
             if ($s.State -ne "Running" -and $s.StartMode -eq "Auto")
             {
-                $WindowsSerivcesOnServerfinding.WarningMessage += "The service "+ $s.Displayname + " is configured to start automatically on Server " +  $($s.systemname) + " is not running."
+                $WindowsSerivcesOnServerfinding.WarningMessage += "The service '"+ $s.Displayname + "' is configured to start automatically on Server '" +  $($s.systemname) + "' is not running."
                 $WindowsSerivcesOnServerfinding.Severity = [SPDiagnostics.Severity]::Critical
             }
 
             if ($s.State -eq "Running" -and $s.StartMode -eq "Disabled")
             {
-                $WindowsSerivcesOnServerfinding.WarningMessage += "The service "+ $s.Displayname + " is disabled on Server " +  $($s.systemname) + " but it is running."
+                $WindowsSerivcesOnServerfinding.WarningMessage += "The service '"+ $s.Displayname + "' is disabled on Server '" +  $($s.systemname) + "' but it is running."
                 $WindowsSerivcesOnServerfinding.Severity = [SPDiagnostics.Severity]::Informational
             }
             if ($s.State -ne "Running" -and ($s.Name -eq "SPTimerV4" -or $s.name -eq "SPAdminV4"))
             {
-                $WindowsSerivcesOnServerfinding.WarningMessage += "The critical service "+ $s.Displayname + " is not running on Server " +  $($s.systemname) + "."
+                $WindowsSerivcesOnServerfinding.WarningMessage += "The critical service '"+ $s.Displayname + "' is not running on Server '" +  $($s.systemname) + "'."
                 $WindowsSerivcesOnServerfinding.Severity = [SPDiagnostics.Severity]::Informational
             }
         
@@ -2727,7 +2840,7 @@ function Get-WindowsSerivcesOnServer
             {
                 if ($s.Startname -notmatch "LocalSystem")
                 {
-                    $WindowsSerivcesOnServerfinding.WarningMessage += "The service "+ $s.Displayname + " is not running in the 'Local System' account on server " +  $($s.systemname) + "."
+                    $WindowsSerivcesOnServerfinding.WarningMessage += "The service '" + $s.Displayname + "' is not running in the 'Local System' account on server " +  $($s.systemname) + "."
                     $WindowsSerivcesOnServerfinding.Severity = [SPDiagnostics.Severity]::Warning
 
                 }
@@ -2740,14 +2853,28 @@ function Get-WindowsSerivcesOnServer
                
                 if ($objSID -ne "S-1-5-19")
                 {
-                    $WindowsSerivcesOnServerfinding.WarningMessage += "The service "+ $s.Displayname + " is not running in the 'Local Service' account  on server " +  $($s.systemname) + "."
+                    $WindowsSerivcesOnServerfinding.WarningMessage += "The service '"+ $s.Displayname + "' is not running in the 'Local Service' account  on server " +  $($s.systemname) + "."
                     $WindowsSerivcesOnServerfinding.Severity = [SPDiagnostics.Severity]::Warning
 
                 }
             }
         }
     }
-    $WindowsSerivcesOnServerfinding.InputObject = $WServiceInfos
+    # Consolidate to one row per server (server shown once); stack each service's columns in parallel
+    # using the ~~~BR~~~ sentinel (<br/> in HTML, " | " in text), matching "Service Instances on Server(s)".
+    $groupedWServices = @()
+    foreach($wsGroup in ($WServiceInfos | Group-Object Computer))
+    {
+        $groupedWServices += [PSCustomObject]@{
+            Computer          = $wsGroup.Name
+            DisplayName       = (($wsGroup.Group | ForEach-Object {$_.DisplayName})       -join '~~~BR~~~')
+            Name              = (($wsGroup.Group | ForEach-Object {$_.Name})              -join '~~~BR~~~')
+            'Service Account' = (($wsGroup.Group | ForEach-Object {$_.'Service Account'}) -join '~~~BR~~~')
+            State             = (($wsGroup.Group | ForEach-Object {$_.State})             -join '~~~BR~~~')
+            StartMode         = (($wsGroup.Group | ForEach-Object {$_.StartMode})         -join '~~~BR~~~')
+        }
+    }
+    $WindowsSerivcesOnServerfinding.InputObject = $groupedWServices
     return $WindowsSerivcesOnServerfinding
 }
 
@@ -2759,28 +2886,49 @@ function Get-HDDiskStatistics
     foreach ($server in $servers)
     {
         $ServerDiskInfos = get-wmiObject -query "select * from win32_LogicalDisk where DriveType=3" -ComputerName $Server.Name
+
+        # Collect each drive as a single line and accumulate per-server totals so all disks for a server land on one row
+        $driveLines = @()
+        $totalSizeBytes = 0
+        $totalFreeBytes = 0
+        $totalUsedBytes = 0
+
         foreach ($serverDiskInfo in $ServerDiskInfos)
         {
-            $sdi = new-object PSObject
-            $sdi | Add-Member -MemberType NoteProperty -Name "Computer" -value $($server.name)
-            $sdi | Add-Member -MemberType NoteProperty -Name "Drive" -Value $serverDiskInfo.DeviceID
-            $sdi | Add-Member -MemberType NoteProperty -Name "VolumeName" -Value $serverDiskInfo.VolumeName
-            $sdi | Add-Member -MemberType NoteProperty -Name "Size (GB)" -Value $([math]::Round($serverDiskInfo.Size/1GB,1))
-            $sdi | Add-Member -MemberType NoteProperty -Name "Free Space (GB)" -Value $([math]::Round($serverDiskInfo.FreeSpace/1GB,1))
-            $sdi | Add-Member -MemberType NoteProperty -Name "Used Space (GB)" -Value $([math]::Round(($serverDiskInfo.Size - $ServerDiskInfo.FreeSpace)/1gb,1))
-            $DiskUsageInfos+= $sdi
+            $sizeGB = [math]::Round($serverDiskInfo.Size/1GB,1)
+            $freeGB = [math]::Round($serverDiskInfo.FreeSpace/1GB,1)
+            $usedGB = [math]::Round(($serverDiskInfo.Size - $serverDiskInfo.FreeSpace)/1GB,1)
+
+            $totalSizeBytes += $serverDiskInfo.Size
+            $totalFreeBytes += $serverDiskInfo.FreeSpace
+            $totalUsedBytes += ($serverDiskInfo.Size - $serverDiskInfo.FreeSpace)
+
+            $volumeName = $serverDiskInfo.VolumeName
+            if([string]::IsNullOrEmpty($volumeName)) { $volumeName = "(no label)" }
+
+            $driveLines += ("{0} ({1}) - {2} / {3} / {4} GB" -f $serverDiskInfo.DeviceID, $volumeName, $freeGB, $sizeGB, $usedGB)
 
             if ($serverDiskInfo.FreeSpace -lt 1GB )
             {
-                $ServerHarddDisks.WarningMessage += "The Disk "+ $serverDiskInfo + " on server " + $server.Name +" has less than 1 GB free space"
+                $ServerHarddDisks.WarningMessage += "The Disk "+ $serverDiskInfo.DeviceID + " on server " + $server.Name +" has less than 1 GB free space"
                 $ServerHarddDisks.Severity = [SPDiagnostics.Severity]::Warning
 
             } elseif ($serverDiskInfo.FreeSpace -lt 5GB )
             {
-                $ServerHarddDisks.WarningMessage += "The Disk "+ $serverDiskInfo + " on server " + $server.Name +" has less than 5 GB free space"
+                $ServerHarddDisks.WarningMessage += "The Disk "+ $serverDiskInfo.DeviceID + " on server " + $server.Name +" has less than 5 GB free space"
                 $ServerHarddDisks.Severity = [SPDiagnostics.Severity]::Informational
             }
         }
+
+        # One consolidated row per server. Drive lines are joined with the ~~~BR~~~ sentinel which the
+        # report writer converts to <br/> for HTML output (or " | " for text output).
+        $sdi = new-object PSObject
+        $sdi | Add-Member -MemberType NoteProperty -Name "Computer" -Value $($server.name)
+        $sdi | Add-Member -MemberType NoteProperty -Name "Disks (Drive - Volume - Free / Size / Used GB)" -Value ($driveLines -join '~~~BR~~~')
+        $sdi | Add-Member -MemberType NoteProperty -Name "Total Size (GB)" -Value $([math]::Round($totalSizeBytes/1GB,1))
+        $sdi | Add-Member -MemberType NoteProperty -Name "Total Free (GB)" -Value $([math]::Round($totalFreeBytes/1GB,1))
+        $sdi | Add-Member -MemberType NoteProperty -Name "Total Used (GB)" -Value $([math]::Round($totalUsedBytes/1GB,1))
+        $DiskUsageInfos += $sdi
     }
     $ServerHarddDisks.InputObject = $DiskUsageInfos
     return $ServerHarddDisks
@@ -2793,7 +2941,7 @@ function Get-ServerLocalGroupMemberships
     $spServers = $script:servers | where-object {$_.role -ne "Invalid"}
     #Task 578: Local "Administrators" group is localized, get the name from the well known SID
     $localAdminGroup = Get-LocalGroup -SID 'S-1-5-32-544'
-    $groups =@("WSS_WPG","WSS_ADMIN_WPG","WSS_RESTRICTED_WPG_V4",$localAdminGroup.Name,"IIS_IUSRS")
+    $groups =@("WSS_WPG","WSS_ADMIN_WPG","WSS_RESTRICTED_WPG_V4",$localAdminGroup.Name,"IIS_IUSRS", "Performance Log Users", "Performance Monitor Users")
     $LocalGroupMemberships=@()
 
     foreach ($s in $spservers)
@@ -2822,13 +2970,25 @@ function Get-ServerLocalGroupMemberships
 
     #ToDo: Add validation
 
-    $ServerLocalGroupMembers.InputObject = $LocalGroupMemberships
+    # Consolidate to one row per server (server shown once); stack each group's columns in parallel
+    # using the ~~~BR~~~ sentinel (<br/> in HTML, " | " in text), matching "Service Instances on Server(s)".
+    $groupedLocalGroups = @()
+    foreach($lgGroup in ($LocalGroupMemberships | Group-Object Server))
+    {
+        $groupedLocalGroups += [PSCustomObject]@{
+            Server  = $lgGroup.Name
+            Group   = (($lgGroup.Group | ForEach-Object {$_.Group})   -join '~~~BR~~~')
+            Members = (($lgGroup.Group | ForEach-Object {$_.Members}) -join '~~~BR~~~')
+            Count   = (($lgGroup.Group | ForEach-Object {$_.Count})   -join '~~~BR~~~')
+        }
+    }
+    $ServerLocalGroupMembers.InputObject = $groupedLocalGroups
     return $ServerLocalGroupMembers
 }
 
 function Get-UserRightsAssignments
 {
-    $userRightsAssignment = New-DiagnosticFinding -Name "GPO - 'User Rights Assignment'" -InputObject $null -Format Table
+    $userRightsAssignment = New-DiagnosticFinding -Name "GPO - 'User Rights Assignment' Policies" -InputObject $null -Format Table
     # Get all SharePoint servers with valid roles
     $servers = $script:servers | Where-Object {$_.role -ne "Invalid"}
 
@@ -2870,7 +3030,7 @@ function Get-UserRightsAssignments
         SeUndockPrivilege                    = "Remove computer from docking station"
         SeTrustedCredManAccessPrivilege      = "Access Credential Manager as a trusted caller"
         SeCreateSymbolicLinkPrivilege        = "Create symbolic links"
-        SeDelegateSessionUserImpersonatePrivilege = "Impersonate a client after authentication"
+        SeDelegateSessionUserImpersonatePrivilege = "Delegate session user impersonate"
         SeIncreaseWorkingSetPrivilege        = "Increase a process working set"
         SeManageVolumePrivilege              = "Perform volume maintenance tasks"
         SeSystemEnvironmentPrivilege         = "Modify firmware environment values"
@@ -2920,7 +3080,7 @@ function Get-UserRightsAssignments
                     [PSCustomObject]@{
                         ComputerName = $env:COMPUTERNAME
                         Policy        = $display
-                        SecuritySettings   = ($resolved -join '; ')
+                        SecuritySettings   = ($resolved -join '  ||  ')
                     }
                 }
             }
@@ -2933,71 +3093,28 @@ function Get-UserRightsAssignments
     {
         Invoke-Command -ComputerName $server.Address -ScriptBlock $scriptBlock -ArgumentList $RightDisplayMap
     }
-    $results = $results | Select ComputerName, Policy, SecuritySettings | Sort-Object ComputerName, Policy
+
+    # Consolidate to a single row per server. All policies for a server are stacked in one cell, joined with the
+    # ~~~BR~~~ sentinel (rendered as <br/> in HTML, " | " in text). The policy name is wrapped in the
+    # ~~~POLICYSTART~~~/~~~POLICYEND~~~ sentinels so it renders bold, separating it from the settings.
+    # The security setting is wrapped in ~~~SETSTART~~~/~~~SETEND~~~ so it renders in light-blue.
+    $consolidated = @()
+    foreach ($group in ($results | Group-Object ComputerName | Sort-Object Name))
+    {
+        $policyLines = foreach ($row in ($group.Group | Sort-Object Policy))
+        {
+            "~~~POLICYSTART~~~{0}:~~~POLICYEND~~~ ~~~SETSTART~~~{1}~~~SETEND~~~" -f $row.Policy, $row.SecuritySettings
+        }
+
+        $uraRow = New-Object PSObject
+        $uraRow | Add-Member -MemberType NoteProperty -Name "ComputerName" -Value $group.Name
+        $uraRow | Add-Member -MemberType NoteProperty -Name "  Policy :  Security Setting" -Value ($policyLines -join '~~~BR~~~')
+        $consolidated += $uraRow
+    }
+
     # Display nicely
-    $userRightsAssignment.InputObject = $results
+    $userRightsAssignment.InputObject = $consolidated
     return $userRightsAssignment
-}
-
-function Get-AllSpServices
-{
-    $AllSPServicesfinding = New-DiagnosticFinding -Name "Services in Farm" -InputObject $null -Format Table
-    $spServicesReport=@()
-    $spservices = get-spservice -all  | sort-object Typename
-    foreach ($spservice in $spservices)
-    {
-       $spso = New-Object psobject
-       $spso | Add-Member -MemberType NoteProperty -name Typename -value $SPService.typename
-       $spso | Add-Member -MemberType NoteProperty -name Displayname -value $SPService.Displayname
-       $spso | Add-Member -MemberType NoteProperty -name status -value $SPService.status
-       $spso | Add-Member -MemberType NoteProperty -name UserAccount -value $($SPService.ProcessIdentity.Username)
-       $spso | Add-Member -MemberType NoteProperty -name Instances -value   $(($SPService.Instances | foreach-Object { $($_.server.Address)}  ) -join (","))
-       $spso | Add-Member -MemberType NoteProperty -name Id -value $SPService.Id
-       $spso | Add-Member -MemberType NoteProperty -name AutoProvision -value $SPService.AutoProvision
-       $spso | Add-Member -MemberType NoteProperty -name "Compliant With MinRole" -value $SPService.CompliantWithMinRole
-       $spso | Add-Member -MemberType NoteProperty -name CanUpgrade -value $SPService.CanUpgrade
-       $spso | Add-Member -MemberType NoteProperty -name "IsBackwards Compatible" -value $SPService.IsBackwardsCompatible
-       #Task 501: NeedsUpgradeIncludeChildren caues  a walk of the upgrade tree (and of all child objects) which is expensive
-       #$spso | Add-Member -MemberType NoteProperty -name "NeedsUpgrade IncludeChildren"-value $SPService.NeedsUpgradeIncludeChildren
-       $spso | Add-Member -MemberType NoteProperty -name NeedsUpgrade -value $SPService.NeedsUpgrade
-       $spso | Add-Member -MemberType NoteProperty -name "Should Defer Upgrade Actions" -value $SPService.ShouldDeferUpgradeActions
-       $spso | Add-Member -MemberType NoteProperty -name "Deployment Locked" -value $SPService.DeploymentLocked
-       $spso | Add-Member -MemberType NoteProperty -name Applications -value ($SPService.Applications -join("."))
-       $spso | Add-Member -MemberType NoteProperty -name Required -value $SPService.Required
-       $spso | Add-Member -MemberType NoteProperty -name "Hidden" -value $SPService.Hidden
-       $spso | Add-Member -MemberType NoteProperty -name RunningJobs -value $($SPService.RunningJobs -join(","))
-       #$spso | Add-Member -MemberType NoteProperty  -name -value $SPService.
-       $spServicesReport += $spso
-    }
-
-    #Todo: Add Validation
-    #  -WSSAdmin is running in NT AUTHORITY\SYSTEM
-    #  -Timer is running in FarmAccount and on all servers
-    #  -All servers are status "Online"
-
-    #Task 501: NeedsUpgradeIncludeChildren caues  a walk of the upgrade tree (and of all child objects) which is expensive
-    <#
-    foreach ($spso in $spServicesReport)
-    {
-        if ($spso.'NeedsUpgrade IncludeChildren'  -or $spso.NeedsUpgrade)
-        {
-            $AllSPServicesfinding.WarningMessage +="The service '" + $spso.Displayname + "' requires an update."
-            $AllSPServicesfinding.Severity =[SPDiagnostics.Severity]::Warning
-        }
-    }
-    #>
-
-    foreach ($spso in $spServicesReport)
-    {
-        if ($spso.'Compliant With MinRole' -eq $false)
-        {
-            $AllSPServicesfinding.WarningMessage +="The service '" + $spso.Displayname + "' is not fully MinRole compliant."
-            $AllSPServicesfinding.Severity =[SPDiagnostics.Severity]::Warning
-        }
-    }
-
-    $AllSPServicesfinding.InputObject = $spServicesReport
-    return $AllSPServicesfinding
 }
 
 function Get-SPDiagnosticServicesOnServer
@@ -3033,7 +3150,22 @@ function Get-SPDiagnosticServicesOnServer
         }
     }
     $runningServices = $runningServices | sort-object Server, Service, status
-    $finding.InputObject =$runningServices 
+
+    # Consolidate to one row per server (server shown once). Each instance's Service/Status/Id is
+    # stacked in parallel using the ~~~BR~~~ line-break sentinel (rendered as <br/> in HTML, " | " in
+    # text), matching the "Disk Usage on Servers" presentation. The flat $runningServices list is kept
+    # for the warning detection below.
+    $groupedServices = @()
+    foreach($svcGroup in ($runningServices | Group-Object Server))
+    {
+        $groupedServices += [PSCustomObject]@{
+            Server  = $svcGroup.Name
+            Service = (($svcGroup.Group | ForEach-Object {$_.Service}) -join '~~~BR~~~')
+            Status  = (($svcGroup.Group | ForEach-Object {$_.Status})  -join '~~~BR~~~')
+            Id      = (($svcGroup.Group | ForEach-Object {$_.Id})       -join '~~~BR~~~')
+        }
+    }
+    $finding.InputObject = $groupedServices
     
     $troubleServices = $runningServices | Where-Object{$_.Status -ne [Microsoft.SharePoint.Administration.SPObjectStatus]::Online}
     if($null -ne $troubleServices)
@@ -3047,12 +3179,12 @@ function Get-SPDiagnosticServicesOnServer
 
 function Get-SPDatabasesInFarm
 {	
-	$spDatabasesInFarm = Get-SPDatabase | Select Name, TypeName, Id, NormalizedDataSource, @{N="DB Size(GB)"; E={$(([System.Math]::Round($_.DiskSizeRequired/1gb,2)))}}, Status, BuildVersion, IsReadOnly, Encrypt, IsSqlAzure, Exists, Username, NeedsUpgrade, NeedsUpgradeIncludeChildren
+	$spDatabasesInFarm = $script:spDatabases | Select Name, TypeName, Id, NormalizedDataSource, @{N="DB Size(GB)"; E={$(([System.Math]::Round($_.DiskSizeRequired/1gb,2)))}}, Status, BuildVersion, IsReadOnly, Encrypt, IsSqlAzure, Exists, Username, NeedsUpgrade, NeedsUpgradeIncludeChildren
     $dbCount = $spDatabasesInFarm.Count
 	$spDatabasesInFarmFinding = New-DiagnosticFinding -Name "Databases in Farm: ($dbCount)" -Format Table -InputObject $null -Description "Shows the databases registered in Farm, per 'Get-SPDatabase' command <BR>"
     foreach($spDatabase in $spDatabasesInFarm)
     {
-        if($spDatabase.NeedsUpgrade -eq $True -or $spDatabase.NeedUpgradeIncludeChildren -eq $True)
+        if($spDatabase.NeedsUpgrade -eq $True -or $spDatabase.NeedsUpgradeIncludeChildren -eq $True)
         {
             $spDatabasesInFarmFinding.Severity = [SPDiagnostics.Severity]::Warning
             $spDatabasesInFarmFinding.WarningMessage = "The following database(s) have 'NeedsUpgrade' and\or 'NeedsUpgradeIncludeChildren' set to 'True'. <BR> These databases could have misaligned schemas and cause various issues within SharePoint"
@@ -3213,6 +3345,29 @@ function Get-SPDiagnosticTimerAndAdminServiceFinding
 }
 
 
+function Get-SPDiagnosticFarmServicesFinding
+{
+    [cmdletbinding()]
+    Param()
+    $farm = [Microsoft.SharePoint.Administration.SPFarm]::Local
+    $notOnlineServices = $farm.Services | Where-Object{$_.Status -ne [Microsoft.SharePoint.Administration.SPObjectStatus]::Online}
+
+    #Only surface this finding when one or more farm services are not "Online"
+    if($null -eq $notOnlineServices)
+    {
+        return $null
+    }
+
+    $servicesReport = $notOnlineServices | Select-Object @{l="TypeName";e={$_.TypeName}}, @{l="DisplayName";e={$_.DisplayName}}, Status, Id
+
+    $finding = New-DiagnosticFinding -Name "Farm Services" -InputObject $servicesReport -Format Table
+    $finding.Severity = [SPDiagnostics.Severity]::Critical
+    $finding.WarningMessage += " - One or more Farm Services (`$farm.Services) are not 'Online'.</br> - The Farm Services listed above are in a status other than 'Online'. Farm Services that are not Online can prevent proper provisioning and functionality within the farm.</br> - Example PowerShell to set the Farm Service object(s) back to 'Online'.<br/><div class=`"code`">`$farm = Get-SPFarm<br/>`$farm.Services | Where-Object{`$_.Status -ne `"Online`"} | foreach{`$_.Status = [Microsoft.SharePoint.Administration.SPObjectStatus]::Online; `$_.Update()}</div>"
+
+    return $finding
+}
+
+
 function Get-SPDiagnosticServiceAppInfo
 {
     [cmdletbinding()]
@@ -3301,6 +3456,7 @@ function Get-SPDiagnosticServiceAppInfo
     $serviceAppRows = @($serviceAppRows | Sort-Object SortKey | Select-Object Name, Type, Status)
 
     $serviceAppFinding = New-DiagnosticFinding -Name "Service Applications" -InputObject $serviceAppRows -Format Table
+    $serviceAppFinding.Description += "- This finding should be similar to 'Central Admin > Applications > Manage Service Applications' page. </br>- Most service applications should have a 'connected' proxy right under it. </br>- If for example, Search Service Application, does not have a proxy right below, but you do see a 'Search Proxy' on the page, then this would indicate that proxy is rogue and search functionality is not working properly. </br>- In this type of scenario, you want to delete the Proxy, then recreate it so it reassociates with the Service App."
 
     $notOnline = $serviceAppRows | Where-Object{$null -ne $_.Status -and $_.Status -ne [Microsoft.SharePoint.Administration.SPObjectStatus]::Online}
     if($null -ne $notOnline)
@@ -3330,12 +3486,6 @@ function Get-SPDiagnosticServiceAppInfo
     $proxyGroupFinding = New-DiagnosticFinding -Name "Proxy Group Associations" -InputObject $proxyGroupObjects -Format Table
 
     $serviceAppFinding.ChildFindings.Add($proxyGroupFinding)
-    
-    #Task 529: Move behind extended findings switch
-    if($ExtendedFindings)
-    {
-        $serviceAppFinding.ChildFindings.Add((Get-SPDiagnosticsTrustedRootAuthority))
-    }
 
     $serviceAppFinding.ChildFindings.Add((Get-SPDiagnosticsUserProfileFinding))
 
@@ -3878,6 +4028,8 @@ function Get-SPDiagnosticsWebAppsFinding
     $webAppList = @()
     foreach($webApp in $webApps)
     {
+        $webAppSiteCount = $null
+        $webAppSiteCount = $webApp.Sites.Count
         # Task 535: Add table for webapps similar to Central Admin
         # get the default zone port:
         $dfltSettings = $webApp.IisSettings[[Microsoft.SharePoint.Administration.SPUrlZone]::Default]
@@ -3929,6 +4081,7 @@ function Get-SPDiagnosticsWebAppsFinding
         }
 
         $webAppFinding = New-DiagnosticFinding -Name $webAppName -InputObject $DisplayAAMs -Format Table
+        $webAppFinding.Description += " Site Count: (" +$webAppSiteCount +")"
 
 
         # itterate through aams to get zones to check to be sure to not miss manually created aams
@@ -4064,9 +4217,7 @@ function Get-SPDiagnosticsWebAppsFinding
         if(!$rootSite)
         {
             $webAppFinding.Severity = [SPDiagnostics.Severity]::Warning
-            $webAppFinding.WarningMessage += "No root site collection present in web application."
-            $webAppFinding.WarningMessage += "Web applications must have a site collection present at their root url."
-            $webAppFinding.WarningMessage += "Please create a site collection at $($($webApp.Url))"
+            $webAppFinding.WarningMessage += " - No root site collection present in web application.<br/> - Web applications must have a site collection present at their root url.<br/> - Please create a site collection at $($($webApp.Url))"
         }
         else 
         {
@@ -4094,10 +4245,129 @@ function Get-SPDiagnosticsWebAppsFinding
         
         $webAppsFinding.ChildFindings.Add($webAppFinding)
     }
+
+    # Consolidated content database file size and growth finding across all web applications.
+    # Previously this was emitted once per web application (as a child of each web app's Content
+    # Database(s) finding), which caused one "Content Database file size and growth Information"
+    # block per web app to be promoted into the Informational Items section. It is now a single
+    # finding with a leading "Web Application" column.
+    $webAppsFinding.ChildFindings.Add((Get-ContentDBFileSizeAndGrowthFinding $webApps))
+
     $webAppsFinding.InputObject = $webAppList
     $webAppsFinding.Format = [SPDiagnostics.Format]::Table
     
     return $webAppsFinding
+}
+
+Function Get-ContentDBFileSizeAndGrowthFinding ($webApps)
+{
+    # Single consolidated finding for content database file size and growth across every web
+    # application. Builds one flat table keyed by a leading "Web Application" column so the
+    # Informational Items section shows a single block instead of one per web application.
+    $DBFileAndSizefinding = New-DiagnosticFinding -Name "Content Database file size and growth Information" -Severity Default -InputObject $null -Format Table
+    $DBFileInfosReport = @()
+
+    # Farm-level flags: track whether any web application / database exhibits each growth issue so a
+    # single generic warning can be emitted after the loop instead of one message per web application.
+    $anyGrowthLtMax = $false
+    $anyRowsBadGrowth = $false
+    $anyTlPercentGrowth = $false
+
+    foreach ($webApp in $webApps)
+    {
+        if($webApp.IsAdministrationWebApplication)
+        {
+            continue
+        }
+
+        $webAppLabel = "$($webApp.DisplayName) ($($webApp.Url))"
+
+        foreach ($db in $webapp.ContentDatabases)
+        {
+            $SQLQuery=" SELECT   'Database Name' = DB_NAME(db.database_id), 'FileName' = mf.NAME, 'CurrentSize' = CONVERT(BIGINT, size /128),
+                'maxsize' = (
+                CASE max_size
+                WHEN - 1
+                THEN N'Unlimited'
+                ELSE CONVERT(NVARCHAR(15), CONVERT(BIGINT, max_size) /128)
+                END
+                )
+                ,Freespace = CONVERT(BIGINT,(size/128.0 - CAST(FILEPROPERTY(mf.name, 'SpaceUsed') AS INT)/128.0 ))
+                ,'growth' = (
+                CASE is_percent_growth
+                WHEN 1
+                THEN growth
+                ELSE CONVERT(BIGINT, growth) /128
+                END
+                )
+                , is_percent_growth as GrowInPercent
+                ,'type_desc' = type_desc
+                FROM sys.master_files mf (NOLOCK)
+                inner join sys.databases db (NOLOCK) on db.database_id = mf.database_id
+                where db.name = '" + $db.Name +"' ORDER BY file_id
+            "
+
+            $dbFileInfos = Invoke-SPSqlCommand -spDatabase $db -query $sqlQuery -ErrorAction SilentlyContinue
+
+            foreach ($dbfileInfo in $dbFileInfos)
+            {
+                if ($dbfileInfo.GrowInPercent -eq $false -and $dbfileInfo.growth -lt $webApp.MaximumFileSize)
+                {
+                    $anyGrowthLtMax = $true
+                }
+                if ($dbfileInfo.type_desc -eq "ROWS" -and $dbfileInfo.growth -eq 1)
+                {
+                    $anyRowsBadGrowth = $true
+                }
+                if ($dbfileInfo.type_desc -eq "LOG" -and $dbfileInfo.GrowInPercent)
+                {
+                    $anyTlPercentGrowth = $true
+                }
+
+                #build object for report
+                $dbfileInfoReport = New-Object PSObject
+                $dbfileInfoReport | add-member -MemberType NoteProperty -name "Web Application" -value $webAppLabel
+                $dbfileInfoReport | add-member -MemberType NoteProperty -name "Database Name" -value $($dbfileInfo.'Database Name')
+                $dbfileInfoReport | add-member -MemberType NoteProperty -name "FileName" -value $($dbfileInfo.FileName)
+                $dbfileInfoReport | add-member -MemberType NoteProperty -name "CurrentSize" -value $($dbfileInfo.CurrentSize.ToString() + " MB")
+                $dbfileInfoReport | add-member -MemberType NoteProperty -name "Maxsize" -value $dbfileInfo.maxsize
+                $dbfileInfoReport | add-member -MemberType NoteProperty -name "Freespace" -value $($dbfileInfo.Freespace.ToString() + " MB")
+                $dbfileInfoReport | add-member -MemberType NoteProperty -name "Growth" -value $($dbfileInfo.growth.ToString() + " MB")
+                $dbfileInfoReport | add-member -MemberType NoteProperty -name "GrowInPercent" -value $dbfileInfo.GrowInPercent
+                $dbfileInfoReport | add-member -MemberType NoteProperty -name "Type_Desc" -value $dbfileInfo.type_desc
+
+                $DBFileInfosReport += $dbfileInfoReport
+            }
+        }
+    }
+
+    # Emit a single, generic warning (no per-web-app repetition and no web app / database names,
+    # since the table below already lists them). Only the explanation lines that actually apply are
+    # included, and the reference link is added once.
+    if ($anyGrowthLtMax -or $anyRowsBadGrowth -or $anyTlPercentGrowth)
+    {
+        $DBFileAndSizefinding.Severity = [SPDiagnostics.Severity]::Informational
+        $DBFileAndSizefinding.ReferenceLink += "https://learn.microsoft.com/en-us/sharepoint/administration/best-practices-for-sql-server-in-a-sharepoint-server-farm#proactively-manage-the-growth-of-data-and-log-files"
+
+        $growthMessage = " - One or more content database or transaction log files listed below have a sub-optimal auto-growth configuration. Review the 'Growth' and 'GrowInPercent' columns in the table for the affected files."
+        if ($anyGrowthLtMax)
+        {
+            $growthMessage += "<BR>- The growth increment on one or more files is smaller than the web application's maximum upload file size, which can trigger multiple database or transaction log file growth operations when a large file is uploaded."
+        }
+        if ($anyRowsBadGrowth)
+        {
+            $growthMessage += "<BR> - One or more data files are configured to grow by only 1 MB, which can cause many small file growth operations."
+        }
+        if ($anyTlPercentGrowth)
+        {
+            $growthMessage += "<BR> - One or more transaction log files are configured to grow by a percentage, which causes small growths when the log is small and unnecessarily large growths when it is big, briefly interrupting the database while the file grows."
+        }
+        $growthMessage += "<BR> - Configure a fixed, appropriately sized auto-growth increment to reduce the number of file growth operations."
+        $DBFileAndSizefinding.WarningMessage += $growthMessage
+    }
+
+    $DBFileAndSizefinding.InputObject = $DBFileInfosReport
+    return $DBFileAndSizefinding
 }
 
 Function Get-WebAppContentDBsFinding ($webapp)
@@ -4172,98 +4442,6 @@ Function Get-WebAppContentDBsFinding ($webapp)
         $cdbfinding.WarningMessage += "The following databases are readonly databases, Data in SharePoint can't be modified when the database is ReadOnly on the SQL server <BR>" + $($ReadOnlyDBs -join ',')     
     }
 
-    #DB file size and growth
-    if(!$webapp.IsAdministrationWebApplication)
-    {
-        $DBFileAndSizefinding = New-DiagnosticFinding -Name "Content Database file size and growth Information" -Severity Default -InputObject $null -Format Table
-        $DBFileInfosReport = @()
-
-        $DBFileBadGrowth=@()
-        $TLFileBadGrowth=@()
-        $FileGrowthLessThenMaxFileSize=@()
-        foreach ($db in $webapp.ContentDatabases)
-        {
-            $SQLQuery=" SELECT   'Database Name' = DB_NAME(db.database_id), 'FileName' = mf.NAME, 'CurrentSize' = CONVERT(BIGINT, size /128),
-                'maxsize' = (
-                CASE max_size
-                WHEN - 1
-                THEN N'Unlimited'
-                ELSE CONVERT(NVARCHAR(15), CONVERT(BIGINT, max_size) /128)
-                END
-                )
-                ,Freespace = CONVERT(BIGINT,(size/128.0 - CAST(FILEPROPERTY(mf.name, 'SpaceUsed') AS INT)/128.0 ))
-                ,'growth' = (
-                CASE is_percent_growth
-                WHEN 1
-                THEN growth
-                ELSE CONVERT(BIGINT, growth) /128
-                END
-                )
-                , is_percent_growth as GrowInPercent
-                ,'type_desc' = type_desc
-                FROM sys.master_files mf (NOLOCK)
-                inner join sys.databases db (NOLOCK) on db.database_id = mf.database_id
-                where db.name = '" + $db.Name +"' ORDER BY file_id
-            "
-        
-            $dbFileInfos = Invoke-SPSqlCommand -spDatabase $db -query $sqlQuery -ErrorAction SilentlyContinue
-
-            foreach ($dbfileInfo in $dbFileInfos)
-            {
-                if ($dbfileInfo.GrowInPercent -eq $false -and $dbfileInfo.growth -lt $webApp.MaximumFileSize)
-                {
-                    $FileGrowthLessThenMaxFileSize += $($dbfileInfo.FileName)
-                }
-                if ($dbFileInfo.Typ_Desc -eq "ROWS" -and $dbfileInfo.growth -eq 1)
-                {
-                    $DBFileBadGrowth += $($dbfileInfo.FileName) + "(1 MB)"
-                }
-                if ($dbfileInfo.type_desc -eq "LOG" -and $dbfileInfo.GrowInPercent)
-                {
-                    $TLFileBadGrowth += $($dbFileInfo.FileName) + "(" + $dbfileInfo.growth + ")"
-                }
-
-                #build object for report
-                $dbfileInfoReport = New-Object PSObject
-                $dbfileInfoReport | add-member -MemberType NoteProperty -name "Database Name" -value $($dbfileInfo.'Database Name')
-                $dbfileInfoReport | add-member -MemberType NoteProperty -name "FileName" -value $($dbfileInfo.FileName)
-                $dbfileInfoReport | add-member -MemberType NoteProperty -name "CurrentSize" -value $($dbfileInfo.CurrentSize.ToString() + " MB")
-                $dbfileInfoReport | add-member -MemberType NoteProperty -name "Maxsize" -value $dbfileInfo.maxsize
-                $dbfileInfoReport | add-member -MemberType NoteProperty -name "Freespace" -value $($dbfileInfo.Freespace.ToString() + " MB")
-                $dbfileInfoReport | add-member -MemberType NoteProperty -name "Growth" -value $($dbfileInfo.growth.ToString() + " MB")
-                $dbfileInfoReport | add-member -MemberType NoteProperty -name "GrowInPercent" -value $dbfileInfo.GrowInPercent
-                $dbfileInfoReport | add-member -MemberType NoteProperty -name "Type_Desc" -value $dbfileInfo.type_desc
-            
-                $DBFileInfosReport += $dbfileInfoReport
-            }
-        }
-
-        if ($FileGrowthLessThenMaxFileSize)
-        {
-            $DBFileAndSizefinding.Severity = [SPDiagnostics.Severity]::Informational
-            $DBFileAndSizefinding.WarningMessage +="For the following database files, the growth value is smaller than the maximum file size: ($($webApp.MaximumFileSize) MB) for the web application: ( $($webApp.Name) ) <BR>" + ($FileGrowthLessThenMaxFileSize -join (',  ')) + "<BR>"
-            $DBFileAndSizefinding.WarningMessage +="This will result in multipe database or transaction log file growth operations when a large file is uploaded.<BR>"
-            $DBFileAndSizefinding.ReferenceLink += "https://learn.microsoft.com/en-us/sharepoint/administration/best-practices-for-sql-server-in-a-sharepoint-server-farm#proactively-manage-the-growth-of-data-and-log-files"
-        }
-
-        if ($DBFileBadGrowth)
-        {
-            $DBFileAndSizefinding.Severity = [SPDiagnostics.Severity]::Informational
-            $DBFileAndSizefinding.WarningMessage +="For the following database files the growth value for the database file is set to 1 MB:<BR>" + ($DBFileBadGrowth -join (', ')) + "<BR>"
-            $DBFileAndSizefinding.WarningMessage +="This will result in multipe database file growth operations when a large file is uploaded.<BR>"
-            $DBFileAndSizefinding.ReferenceLink += "https://learn.microsoft.com/en-us/sharepoint/administration/best-practices-for-sql-server-in-a-sharepoint-server-farm#proactively-manage-the-growth-of-data-and-log-files"
-        }
-        if ($TLFileBadGrowth)
-        {
-            $DBFileAndSizefinding.Severity = [SPDiagnostics.Severity]::Informational
-            $DBFileAndSizefinding.WarningMessage +="For the following database files the growth value for the Transaction log is set to a percental value:<BR>" + ($DBFileBadGrowth -join (', ')) + "<BR>"
-            $DBFileAndSizefinding.WarningMessage +="This will result in many small file growth operations when the transaction log is small and unecessary big file growth operations when the transaction log file is big resulting in a breaf outage of hte database while the file is growing.<BR>"
-            $DBFileAndSizefinding.ReferenceLink += "https://learn.microsoft.com/en-us/sharepoint/administration/best-practices-for-sql-server-in-a-sharepoint-server-farm#proactively-manage-the-growth-of-data-and-log-files"
-        }
-    
-        $DBFileAndSizefinding.InputObject = $DBFileInfosReport
-        $cdbfinding.Childfindings.Add($DBFileAndSizefinding)
-    }
     
     return $cdbfinding
 }
@@ -4287,7 +4465,7 @@ function Get-SPWebAppApplicationPool ($webapp)
     # Determine which servers to target
     if ($webapp.IsAdministrationWebApplication)
     {
-        # Central Admin Web App → look for servers running the CA service instance
+        # Central Admin Web App Ã¢â€ â€™ look for servers running the CA service instance
         $servers = Get-SPServiceInstance |
             Where-Object {
                 $_.TypeName -eq "Central Administration" -and
@@ -4298,7 +4476,7 @@ function Get-SPWebAppApplicationPool ($webapp)
     }
     else
     {
-        # Regular Web App → look for servers running the Web Application service
+        # Regular Web App Ã¢â€ â€™ look for servers running the Web Application service
         $servers = Get-SPServiceInstance |
             Where-Object {
                 $_.TypeName -eq "Microsoft SharePoint Foundation Web Application" -and
@@ -4336,7 +4514,7 @@ function Get-SPWebAppApplicationPool ($webapp)
         Invoke-Command -ComputerName $server -ScriptBlock $scriptBlock -ArgumentList $webapp.ApplicationPool.Name
     }
 
-    # Create a sub‑finding for IIS settings
+    # Create a subÃ¢â‚¬â€˜finding for IIS settings
     $IISAppPoolFinding = New-DiagnosticFinding `
         -name "IIS App Pool Settings" `
         -severity default `
@@ -5335,7 +5513,7 @@ function Get-SPDiagnosticsFarmSolutionsFinding
             
 
             $solutionFinding.Severity = [SPDiagnostics.Severity]::Critical
-            $solutionFinding.WarningMessage += ("Solution is not deployed to {0} server(s), incomplete solution deployment can cause issues. Please deploy this solutiont to the mentioned servers. To deploy this solution use the Install-SPSolution with the -Local switch on the server(s) where it is missing." -f $missingDeploymentServers.Count, $missingServerStr)
+            $solutionFinding.WarningMessage += ("Solution is not deployed to {0} server(s), incomplete solution deployment can cause issues. Please deploy this solution to the mentioned servers. To deploy this solution use the Install-SPSolution with the -Local switch on the server(s) where it is missing." -f $missingDeploymentServers.Count, $missingServerStr)
             $solutionFinding.WarningMessage += ("Missing on {0} server(s): {1}" -f $missingDeploymentServers.Count, [string]::Join(", ", $missingServerNames))
             $solutionFinding.ReferenceLink += "https://learn.microsoft.com/en-us/powershell/module/sharepoint-server/install-spsolution?view=sharepoint-server-ps"
             #$solutionFinding.WarningMessage += $installCmd
@@ -5489,7 +5667,7 @@ function Get-SPSessionStateServiceFinding
     if ($sss.CatalogName -match " ")
     {
         $SSSFinding.Severity = [SPDiagnostics.Severity]::Warning
-        $SSSFinding.WarningMessage+="In multiple SharePoint builds it is not possible to add a new server to a SharePoint farm when the name of the Secure Store Database contains a blank/space charater. It might be necessary to disable the Session State Service and enable it again with a new database having a name without a blank/space."
+        $SSSFinding.WarningMessage+="In multiple SharePoint builds it is not possible to add a new server to a SharePoint farm when the name of the Secure Store Database contains a blank/space character. It might be necessary to disable the Session State Service and enable it again with a new database having a name without a blank/space."
     }
     return $SSSFinding
     }
@@ -5586,12 +5764,13 @@ function Get-SPDiagnosticAuthFindings
     {
         $authFindings.Severity = [SPDiagnostics.Severity]::Warning
         $authFindings.WarningMessage += "Basic authentication detected in one or more web applications. Basic authentication is inherently insecure as it sends user credentials in plain text."
-        $authFindings.WarningMessage += "Basic authentication is now blocked by Microsoft 365 apps by default, while this can be allowed as described in below article it is recommended to use a more secure method of authenticaiton."
+        $authFindings.WarningMessage += "Basic authentication is now blocked by Microsoft 365 apps by default, while this can be allowed as described in below article it is recommended to use a more secure method of authentication."
         $authFindings.ReferenceLink += "https://learn.microsoft.com/en-us/DeployOffice/security/basic-authentication-prompts-blocked"
     }
 
 
     $authFindings.ChildFindings.Add((Get-SPDiagnosticsSPSecurityTokenServiceConfigFinding))
+    $authFindings.ChildFindings.Add((Get-SPDiagnosticsTrustedRootAuthority))
     $authFindings.ChildFindings.Add((Get-SPDiagnosticsSPTrustedIdentityTokenIssuerFinding))
     $authFindings.ChildFindings.Add((Get-SPDiagnosticsSPTrustedSecurityTokenIssuerFinding))
     $authFindings.ChildFindings.Add((Get-SPDiagnosticsSPClaimProviderFinding))
@@ -5611,7 +5790,7 @@ function Get-SPDiagnosticsTokenTimeoutFinding
     $cs = [Microsoft.SharePoint.Administration.SPWebService]::ContentService
     if($cs.TokenTimeout -ne [System.TimeSpan]::new(0, 1440, 0))
     {
-        $finding =  New-DiagnosticFinding -Name "Token-timeout is set to non-standard value"  -WarningMessage "When the tokent timeout is set to a non-standard value unexpected issues can occur, this should be set to the default value of 24 hours (1440 minutes).<br><div class=`"code`">`$cs = [Microsoft.SharePoint.Administration.SPWebService]::ContentService<br>`$cs.TokenTimeout = New-TimeSpan -Minutes 1440<br>`$cs.Update()</div>" -Severity Critical
+        $finding =  New-DiagnosticFinding -Name "Token-timeout is set to non-standard value"  -WarningMessage "When the token timeout is set to a non-standard value unexpected issues can occur, this should be set to the default value of 24 hours (1440 minutes).<br><div class=`"code`">`$cs = [Microsoft.SharePoint.Administration.SPWebService]::ContentService<br>`$cs.TokenTimeout = New-TimeSpan -Minutes 1440<br>`$cs.Update()</div>" -Severity Critical
         return $finding
     }
 }
@@ -5624,6 +5803,8 @@ function Get-SPDiagnosticsSPSecurityTokenServiceConfigFinding
     
     $stsConfig = Get-SPSecurityTokenServiceConfig
     $stsFindingObj = $stsConfig | Select-Object -Property `
+    DisplayName,`
+    NameIdentifier,`
     AllowMetadataOverHttp,`
     UseSessionCookies,`
     WindowsTokenLifetime,`
@@ -5655,7 +5836,7 @@ function Get-SPDiagnosticsSPSecurityTokenServiceConfigFinding
     HybridStsSelectionEnabled,`
     WindowsModeIgnoreCache
     
-    $finding = New-DiagnosticFinding -Name "Security token service config" -ReferenceLink "https://joshroark.com/sharepoint-users-forced-to-re-authenticate-unexpectedly/" -InputObject $stsFindingObj -Format List
+    $finding = New-DiagnosticFinding -Name "Security Token Service Config" -ReferenceLink "https://joshroark.com/sharepoint-users-forced-to-re-authenticate-unexpectedly/" -InputObject $stsFindingObj -Format List
 
     #Check the size of the MaxLogonTokenCacheItems if trusted issuers are present
     $maxLogonTokenCacheItemsThreshold = 2000
@@ -5993,6 +6174,46 @@ Function Get-RemoteEncTypeValue
     return $result
 }
 
+Function New-KPill($State, $Text)
+{
+    # Emits a colored status pill using the ~~~PILL...~~~ sentinels decoded in Write-DiagnosticReport
+    # (green/red/amber in HTML, plain text in the TEXT report). State: 'good' | 'bad' | 'warn'.
+    switch ($State)
+    {
+        'good'  { return "~~~PILLGOOD~~~$Text~~~PILLEND~~~" }
+        'bad'   { return "~~~PILLBAD~~~$Text~~~PILLEND~~~" }
+        'warn'  { return "~~~PILLWARN~~~$Text~~~PILLEND~~~" }
+        default { return [string]$Text }
+    }
+}
+
+Function Get-KAesCell([bool]$On)
+{
+    # AES columns: enabled is good (green), missing is bad (red).
+    if ($On) { return (New-KPill 'good' 'Yes') } else { return (New-KPill 'bad' 'No') }
+}
+
+Function Get-KWeakCell([bool]$On)
+{
+    # Weak-cipher columns (RC4/DES): enabled is bad (red), disabled is good (green).
+    if ($On) { return (New-KPill 'bad' 'Yes') } else { return (New-KPill 'good' 'No') }
+}
+
+Function Get-KerberosEncTypeLabel($Value)
+{
+    # Decodes a msDS-SupportedEncryptionTypes / SupportedEncryptionTypes bitmask into a friendly label
+    # plus the raw hex value, e.g. "AES256, AES128 (0x18)".
+    $v = [int]$Value
+    $parts = @()
+    if ($v -band 16) { $parts += 'AES256' }
+    if ($v -band 8)  { $parts += 'AES128' }
+    if ($v -band 4)  { $parts += 'RC4' }
+    if ($v -band 2)  { $parts += 'DES-MD5' }
+    if ($v -band 1)  { $parts += 'DES-CRC' }
+    if ($parts.Count -eq 0) { $label = 'None' } else { $label = ($parts -join ', ') }
+    return ("{0} (0x{1:X})" -f $label, $v)
+}
+
 Function Get-SPDiagnosticKerberosFindings
 {
     $KerberosFindings = New-DiagnosticFinding -Name "Kerberos configuration" -InputObject $null -Format List
@@ -6003,31 +6224,36 @@ Function Get-SPDiagnosticKerberosFindings
         return $KerberosFindings
     }
 
-    $AES_128 = 0x8
-    $AES_256 = 0x10
     $Separator = "\"
     $option = [System.StringSplitOptions]::RemoveEmptyEntries
-    $sep = "---------------------------------------------------------"
-    $bar = "========================================================="
     $PolicyKeyPath = "SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Kerberos\Parameters"
     $LsaKeyPath = "SYSTEM\CurrentControlSet\Control\Lsa\Kerberos\Parameters"
     $warn = $false
-    $lines = @()
 
-    $lines += New-KConsoleLine 'k-head' $bar
-    $lines += New-KConsoleLine 'k-head' " STARTING SHAREPOINT KERBEROS CONFIGURATION AUDIT"
-    $lines += New-KConsoleLine 'k-head' $bar
-    $lines += ''
+    $accountRows = @()   # one row per managed account (encryption types)
+    $serverRows  = @()   # one row per farm server (OS Kerberos policy)
+    $spnGroups   = @()   # one row per owner (account/server), SPNs stacked
 
-    $lines += New-KConsoleLine 'k-white' "[1/2] Retrieving SharePoint Managed Accounts & SPNs..."
+    $accountsChecked    = 0
+    $accountsMissingAes = 0
+    $serversChecked     = 0
+    $serversWeak        = 0
+    $policyLsaMismatch  = 0
 
+    # ---------------------------------------------------------------------------------------------
+    # [1/2] SharePoint Managed Accounts: AES support (msDS-SupportedEncryptionTypes) and SPNs
+    # ---------------------------------------------------------------------------------------------
     foreach ($ManagedAccount in (Get-SPManagedAccount))
     {
-        $lines += New-KConsoleLine 'k-sep' $sep
-        $lines += New-KConsoleLine 'k-acct' ("Checking Account: {0}" -f $ManagedAccount.Username)
-
-        $samAccountNameParts = $ManagedAccount.Username.Split($Separator, 2, $option)
+        $accountsChecked++
+        $acctName = $ManagedAccount.Username
+        $samAccountNameParts = $acctName.Split($Separator, 2, $option)
         $samAccountName = if ($samAccountNameParts.Count -gt 1) { $samAccountNameParts[1] } else { $samAccountNameParts[0] }
+
+        $aes256 = $false; $aes128 = $false; $rc4 = $false; $des = $false
+        $encLabel = ""
+        $statusState = "good"; $statusText = "OK"
+        $acctSpns = @()
 
         try
         {
@@ -6046,66 +6272,80 @@ Function Get-SPDiagnosticKerberosFindings
             $EncryptionTypes = $userobj.properties.Item('msds-supportedencryptiontypes')[0]
             if ($null -ne $EncryptionTypes)
             {
-                if ($EncryptionTypes -band $AES_128)
-                {
-                    $lines += New-KConsoleLine 'k-ok' "  [+] AD Account Supports AES128 bit encryption"
-                }
-                else
-                {
-                    $lines += New-KConsoleLine 'k-bad' "  [-] AD Account Does NOT have AES128 bit encryption enabled"
-                    $warn = $true
-                }
+                $v = [int]$EncryptionTypes
+                $aes256 = [bool]($v -band 16)
+                $aes128 = [bool]($v -band 8)
+                $rc4    = [bool]($v -band 4)
+                $des    = [bool](($v -band 1) -or ($v -band 2))
+                $encLabel = (Get-KerberosEncTypeLabel $v)
 
-                if ($EncryptionTypes -band $AES_256)
+                if ($aes128 -and $aes256)
                 {
-                    $lines += New-KConsoleLine 'k-ok' "  [+] AD Account Supports AES256 bit encryption"
+                    $statusState = "good"; $statusText = "OK"
+                }
+                elseif ($aes128 -or $aes256)
+                {
+                    $statusState = "warn"; $statusText = "Partial AES"; $warn = $true; $accountsMissingAes++
                 }
                 else
                 {
-                    $lines += New-KConsoleLine 'k-bad' "  [-] AD Account Does NOT have AES256 bit encryption enabled"
-                    $warn = $true
+                    $statusState = "bad"; $statusText = "No AES"; $warn = $true; $accountsMissingAes++
                 }
             }
             else
             {
-                $lines += New-KConsoleLine 'k-warn' "  [-] msDS-SupportedEncryptionTypes is Not Set (Defaults to RC4/DES unless OS overrides)"
-                $warn = $true
+                # Not set: Windows defaults to RC4/DES unless the OS overrides.
+                $encLabel = "Not Set"
+                $rc4 = $true; $des = $true
+                $statusState = "warn"; $statusText = "Not Set"; $warn = $true; $accountsMissingAes++
             }
 
             $SPNs = $userobj.properties.Item('serviceprincipalname')
             if ($SPNs)
             {
-                $lines += New-KConsoleLine 'k-info' "  [i] Configured SPNs for this account:"
-                foreach ($spn in $SPNs)
-                {
-                    $lines += New-KConsoleLine 'k-info' ("      -> {0}" -f $spn)
-                }
-            }
-            else
-            {
-                $lines += New-KConsoleLine 'k-warn' "  [-] No SPNs found registered to this account."
+                foreach ($spn in $SPNs) { $acctSpns += [string]$spn }
             }
         }
         else
         {
-            $lines += New-KConsoleLine 'k-bad' ("  [!] Could not find account {0} in Active Directory." -f $samAccountName)
-            $warn = $true
+            $encLabel = "Account not found in AD"
+            $statusState = "bad"; $statusText = "Not Found"; $warn = $true; $accountsMissingAes++
+        }
+
+        $accountRows += [PSCustomObject]@{
+            Account = $acctName
+            AES256  = (Get-KAesCell $aes256)
+            AES128  = (Get-KAesCell $aes128)
+            RC4     = (Get-KWeakCell $rc4)
+            DES     = (Get-KWeakCell $des)
+            "msDS-SupportedEncryptionTypes" = $encLabel
+            SPNs    = $acctSpns.Count
+            Status  = (New-KPill $statusState $statusText)
+        }
+
+        if ($acctSpns.Count -gt 0)
+        {
+            $spnGroups += [PSCustomObject]@{
+                Scope = "Account"
+                Owner = $acctName
+                Count = $acctSpns.Count
+                SPN   = ($acctSpns -join '~~~BR~~~')
+                Type  = (($acctSpns | ForEach-Object { ($_ -split '/')[0] }) -join '~~~BR~~~')
+            }
         }
     }
 
-    $lines += ''
-    $lines += New-KConsoleLine 'k-head' $bar
-    $lines += New-KConsoleLine 'k-white' "[2/2] Retrieving SharePoint Farm Servers, SPNs & Local Policies..."
-    $lines += New-KConsoleLine 'k-head' $bar
-
+    # ---------------------------------------------------------------------------------------------
+    # [2/2] Farm Servers: computer-object SPNs and the OS Kerberos encryption policy (Policy vs LSA)
+    # ---------------------------------------------------------------------------------------------
     $FarmServers = Get-SPServer | Where-Object { $_.Role -ne "Invalid" } | Sort-Object Name
 
     foreach ($Server in $FarmServers)
     {
-        $lines += New-KConsoleLine 'k-sep' $sep
-        $lines += New-KConsoleLine 'k-acct' ("Checking Server: {0}" -f $Server.Name)
-
+        $serversChecked++
+        $srvSpns = @()
         $serverSam = "$($Server.Name)$"
+
         try
         {
             $serverSearcher = [adsisearcher]"samAccountName=$serverSam"
@@ -6122,26 +6362,31 @@ Function Get-SPDiagnosticKerberosFindings
             $ServerSPNs = $serverObj.properties.Item('serviceprincipalname')
             if ($ServerSPNs)
             {
-                $lines += New-KConsoleLine 'k-info' "  [i] Registered Server SPNs (HOST/HTTP/etc):"
-                foreach ($sSpn in $ServerSPNs)
-                {
-                    $lines += New-KConsoleLine 'k-info' ("      -> {0}" -f $sSpn)
-                }
-            }
-            else
-            {
-                $lines += New-KConsoleLine 'k-warn' "  [-] No SPNs found for this server object in AD."
+                foreach ($sSpn in $ServerSPNs) { $srvSpns += [string]$sSpn }
             }
         }
         else
         {
-            $lines += New-KConsoleLine 'k-bad' ("  [!] Server computer object ({0}) not found in AD." -f $serverSam)
             $warn = $true
         }
 
-        $lines += New-KConsoleLine 'k-white' "  [i] Querying Local Kerberos Security Policy via Remote Registry..."
+        if ($srvSpns.Count -gt 0)
+        {
+            $spnGroups += [PSCustomObject]@{
+                Scope = "Server"
+                Owner = $serverSam.TrimEnd("$")
+                Count = $srvSpns.Count
+                SPN   = ($srvSpns -join '~~~BR~~~')
+                Type  = (($srvSpns | ForEach-Object { ($_ -split '/')[0] }) -join '~~~BR~~~')
+            }
+        }
 
+        # Local Kerberos encryption policy via remote registry (GPO Policy key + effective LSA key)
+        $configuredLabel = "Unable to read"
+        $paes256 = $false; $paes128 = $false; $prc4 = $false; $pdes = $false
+        $matchState = "warn"; $matchText = "Unknown"
         $regKey = $null
+
         try
         {
             $regKey = [Microsoft.Win32.RegistryKey]::OpenRemoteBaseKey(
@@ -6149,75 +6394,117 @@ Function Get-SPDiagnosticKerberosFindings
                 $Server.Name,
                 [Microsoft.Win32.RegistryView]::Registry64)
 
-            $lines += New-KConsoleLine 'k-white' ("    [Policy] HKLM\{0}" -f $PolicyKeyPath)
             $PolicyResult = Get-RemoteEncTypeValue -BaseKey $regKey -SubKeyPath $PolicyKeyPath
-            $lines += $PolicyResult.Lines
+            $LsaResult    = Get-RemoteEncTypeValue -BaseKey $regKey -SubKeyPath $LsaKeyPath
             $PolicyEncTypes = $PolicyResult.Value
-            if ($null -ne $PolicyEncTypes)
-            {
-                $lines += Show-KerberosEncTypes -Value $PolicyEncTypes
-                if (([int]$PolicyEncTypes -band 0x4) -or ([int]$PolicyEncTypes -band 0x3)) { $warn = $true }
-            }
-            else
-            {
-                $lines += New-KConsoleLine 'k-warn' "      -> 'SupportedEncryptionTypes' Not Defined here (Windows defaults to allowing all except DES)."
-            }
+            $LsaEncTypes    = $LsaResult.Value
 
-            $lines += New-KConsoleLine 'k-white' ("    [LSA] HKLM\{0}" -f $LsaKeyPath)
-            $LsaResult = Get-RemoteEncTypeValue -BaseKey $regKey -SubKeyPath $LsaKeyPath
-            $lines += $LsaResult.Lines
-            $LsaEncTypes = $LsaResult.Value
-            if ($null -ne $LsaEncTypes)
+            # Effective value: prefer the LSA (runtime) key, fall back to the GPO Policy key.
+            if ($null -ne $LsaEncTypes) { $effective = [int]$LsaEncTypes }
+            elseif ($null -ne $PolicyEncTypes) { $effective = [int]$PolicyEncTypes }
+            else { $effective = $null }
+
+            if ($null -ne $effective)
             {
-                $lines += Show-KerberosEncTypes -Value $LsaEncTypes
-                if (([int]$LsaEncTypes -band 0x4) -or ([int]$LsaEncTypes -band 0x3)) { $warn = $true }
+                $paes256 = [bool]($effective -band 16)
+                $paes128 = [bool]($effective -band 8)
+                $prc4    = [bool]($effective -band 4)
+                $pdes    = [bool](($effective -band 1) -or ($effective -band 2))
+                $configuredLabel = (Get-KerberosEncTypeLabel $effective)
+                if ($prc4 -or $pdes) { $warn = $true; $serversWeak++ }
             }
             else
             {
-                $lines += New-KConsoleLine 'k-warn' "      -> 'SupportedEncryptionTypes' Not Defined here (LSA falls back to OS defaults)."
+                $configuredLabel = "Not Defined (OS defaults)"
             }
 
             if (($null -ne $PolicyEncTypes) -and ($null -ne $LsaEncTypes))
             {
                 if ([int]$PolicyEncTypes -eq [int]$LsaEncTypes)
                 {
-                    $lines += New-KConsoleLine 'k-ok' "    [=] Policy and LSA values MATCH."
+                    $matchState = "good"; $matchText = "Yes"
                 }
                 else
                 {
-                    $lines += New-KConsoleLine 'k-bad' ("    [!] MISMATCH: Policy={0}  LSA={1} (a gpupdate may be pending or a manual edit was made)." -f [int]$PolicyEncTypes, [int]$LsaEncTypes)
-                    $warn = $true
+                    $matchState = "bad"; $matchText = "No"; $warn = $true; $policyLsaMismatch++
                 }
+            }
+            elseif (($null -eq $PolicyEncTypes) -and ($null -eq $LsaEncTypes))
+            {
+                $matchState = "warn"; $matchText = "Neither set"
+            }
+            else
+            {
+                $matchState = "warn"; $matchText = "Partial"
             }
         }
         catch
         {
-            $lines += New-KConsoleLine 'k-bad' ("      [!] Failed to connect to remote registry on {0}. Ensure Remote Registry service is running and accessible." -f $Server.Name)
-            $lines += New-KConsoleLine 'k-err2' ("          Error: {0}" -f $_.Exception.Message)
+            $configuredLabel = "Registry unreachable"
+            $matchState = "bad"; $matchText = "Error"
             $warn = $true
         }
         finally
         {
             if ($regKey) { $regKey.Close() }
         }
+
+        $serverRows += [PSCustomObject]@{
+            Server = $Server.Name
+            "Configured Value (LSA Effective)" = $configuredLabel
+            AES256 = (Get-KAesCell $paes256)
+            AES128 = (Get-KAesCell $paes128)
+            RC4    = (Get-KWeakCell $prc4)
+            DES    = (Get-KWeakCell $pdes)
+            "Policy = LSA" = (New-KPill $matchState $matchText)
+        }
     }
 
-    $lines += ''
-    $lines += New-KConsoleLine 'k-head' $bar
-    $lines += New-KConsoleLine 'k-head' " AUDIT COMPLETE"
-    $lines += New-KConsoleLine 'k-head' $bar
+    # ---------------------------------------------------------------------------------------------
+    # Warning banner (kept from the original console version) + reference link
+    # ---------------------------------------------------------------------------------------------
+    $KerberosFindings.ReferenceLink += "https://learn.microsoft.com/en-us/sharepoint/troubleshoot/security/configuration-to-support-kerberos-aes-encryption"
 
     if ($warn)
     {
         $KerberosFindings.Severity = [SPDiagnostics.Severity]::Warning
         $warnHtml  = '<div class="warning-message">'
-        $warnHtml += 'One or more Kerberos issues were detected (an account missing AES, a server allowing RC4/DES, or a Policy/LSA mismatch). Review the highlighted lines below. Since the November 2022 Security Updates, Windows enforces AES128/AES256 encryption of Kerberos tickets; this must be explicitly allowed for each account that authenticates with Kerberos.'
-        $warnHtml += '<br><br>Reference: <a href="https://learn.microsoft.com/en-us/sharepoint/troubleshoot/security/configuration-to-support-kerberos-aes-encryption" target="_blank">Configuration to support Kerberos AES encryption</a>'
+        $warnHtml += 'One or more Kerberos issues were detected (an account missing AES, a server allowing RC4/DES, or a Policy/LSA mismatch). Review the highlighted rows below. Since the November 2022 Security Updates, Windows enforces AES128/AES256 encryption of Kerberos tickets; this must be explicitly allowed for each account that authenticates with Kerberos.'
         $warnHtml += '</div>'
         $KerberosFindings.Description += $warnHtml
     }
 
-    $KerberosFindings.Description += ('<div class="kconsole">{0}</div>' -f ($lines -join "`r`n"))
+    # ---------------------------------------------------------------------------------------------
+    # Summary (key/value) + detail tables as child findings
+    # ---------------------------------------------------------------------------------------------
+    if ($accountsMissingAes -gt 0) { $accMissingCell  = New-KPill 'bad' $accountsMissingAes } else { $accMissingCell  = New-KPill 'good' '0' }
+    if ($serversWeak -gt 0)        { $serversWeakCell = New-KPill 'bad' $serversWeak }         else { $serversWeakCell = New-KPill 'good' '0' }
+    if ($policyLsaMismatch -gt 0)  { $mismatchCell    = New-KPill 'bad' $policyLsaMismatch }   else { $mismatchCell    = New-KPill 'good' '0' }
+    if ($warn)                     { $overallCell     = New-KPill 'warn' 'Review recommended' } else { $overallCell    = New-KPill 'good' 'Healthy' }
+
+    $summaryRows = @(
+        [PSCustomObject]@{ Metric = 'Managed Accounts Checked';     Value = [string]$accountsChecked }
+        [PSCustomObject]@{ Metric = 'Accounts Missing / Unset AES'; Value = $accMissingCell }
+        [PSCustomObject]@{ Metric = 'Farm Servers Checked';         Value = [string]$serversChecked }
+        [PSCustomObject]@{ Metric = 'Servers Allowing RC4 / DES';   Value = $serversWeakCell }
+        [PSCustomObject]@{ Metric = 'Policy vs LSA Mismatches';     Value = $mismatchCell }
+        [PSCustomObject]@{ Metric = 'Overall Assessment';           Value = $overallCell }
+    )
+
+    $summaryFinding = New-DiagnosticFinding -Name "Kerberos Summary" -InputObject $summaryRows -Format Table
+    $KerberosFindings.ChildFindings.Add($summaryFinding)
+
+    $acctFinding = New-DiagnosticFinding -Name "Managed Account Encryption Types" -InputObject $accountRows -Format Table
+    $KerberosFindings.ChildFindings.Add($acctFinding)
+
+    $srvFinding = New-DiagnosticFinding -Name "Server OS Kerberos Encryption Policy (Registry)" -InputObject $serverRows -Format Table
+    $KerberosFindings.ChildFindings.Add($srvFinding)
+
+    if ($spnGroups.Count -gt 0)
+    {
+        $spnFinding = New-DiagnosticFinding -Name "Service Principal Names (SPNs)" -InputObject $spnGroups -Format Table -Description "Grouped one row per owner (account or server); each owner's SPNs are stacked in a single cell, matching the 'Service Instances on Server(s)' presentation."
+        $KerberosFindings.ChildFindings.Add($spnFinding)
+    }
 
     return $KerberosFindings
 }
@@ -6344,6 +6631,11 @@ function Get-SPDiagnosticSearchFindings
 
     $searchFindings = New-DiagnosticFinding -Name "Search Information" -Severity Default -InputObject $null
     $searchFindings.Description += "Some findings may not show up if things are 'Ok'<br/> Ex: Search\HC instances, Server Name Mappings, Crawl Rules.<br/> If we do not find any values, then we will not report the finding."
+
+    # Accumulator for content sources (across every SSA) that have no scheduled or continuous crawl.
+    # Populated by Get-SPDiagnosticsSSAContentSources and rendered once as a single consolidated
+    # finding after the SSA loop below. Reset here so repeat runs in the same session start clean.
+    $script:NoScheduledCrawlContentSources = @()
     if($null -eq $SSAs -or $SSAs.Count -eq 0)
     {
         $searchFindings.Description+="There are no SSA's in this farm"
@@ -6398,6 +6690,7 @@ function Get-SPDiagnosticSearchFindings
         $ssaFindings.ChildFindings.Add((Get-SPDiagnosticsSSATLegacyAdmin -searchApplication $ssa))
         $ssaFindings.ChildFindings.Add((Get-SPDiagnosticsSSACDProp -searchApplication $ssa))
         $ssaFindings.ChildFindings.Add((Get-SPDiagnosticsSSAContentSources -searchapplication $ssa))
+        $ssaFindings.ChildFindings.Add((Get-SPDiagnosticsSSASchemaMappings -searchApplication $ssa))
         $ssaFindings.ChildFindings.Add((Get-SPDiagnosticsSSAServerNameMappings -searchApplication $ssa))
         $ssaFindings.ChildFindings.Add((Get-SPDiagnosticsSSACrawlRules -searchApplication $ssa))
         $ssaFindings.ChildFindings.Add((Get-SPDiagnostictsSSAQueryAuthority -searchApplication $ssa))
@@ -6405,6 +6698,19 @@ function Get-SPDiagnosticSearchFindings
         $ssaFindings.ChildFindings.Add((Get-SPDiagnosticsSSAEndpoints -searchApplication $ssa))
         #$ssaFindings.ChildFindings.Add((Get-SPDiagnosticsIndexDiskSpace -searchApplication $SSA))
         $searchFindings.ChildFindings.Add($ssaFindings) 
+    }
+
+    # Consolidated finding: content sources across all SSAs that have no scheduled or continuous
+    # crawl. Previously each such content source produced its own Informational "Crawl Schedule ..."
+    # finding that was promoted individually into the Informational Items section. They are now
+    # collapsed into a single finding that calls out the Search Service Application and content source.
+    if($script:NoScheduledCrawlContentSources -and $script:NoScheduledCrawlContentSources.Count -gt 0)
+    {
+        $noScheduledCrawlFinding = New-DiagnosticFinding -Name "Content Sources without a scheduled crawl" -Severity Default -InputObject $script:NoScheduledCrawlContentSources -Format Table
+        $noScheduledCrawlFinding.Severity = [SPDiagnostics.Severity]::Informational
+        $noScheduledCrawlFinding.Description += "The content sources listed below have no scheduled crawl and do not have continuous crawls enabled. Without a valid crawl schedule, their content will not be indexed or kept up to date. The Search Service Application and content source are identified for each."
+        $noScheduledCrawlFinding.ReferenceLink += [uri]"https://learn.microsoft.com/en-us/sharepoint/search/add-edit-or-delete-a-content-source"
+        $searchFindings.ChildFindings.Add($noScheduledCrawlFinding)
     }
 
     return $searchFindings
@@ -6550,16 +6856,14 @@ function Get-SPDiagnosticsSSATLegacyAdmin
     if($null -eq $searchApplication.SystemManagerLocations)
     {
         $finding.Severity = [SPDiagnostics.Severity]::Critical
-        $finding.WarningMessage+="<li>We detect the 'System Manager Location' is empty. The SSA will be broken when this is the case. </li>"
+        $finding.WarningMessage+=" - We detect the 'System Manager Location' is empty. The SSA will be broken when this is the case."
     }
     else
     {
         $sysManagerLocation = $searchApplication.SystemManagerLocations.AbsoluteUri
-        $finding.Description+="<li>The 'SystemManagerLocations' is associated with the 'non-legacy' piece of the AdminComponent</li>"
-        $finding.Description+="<li>This value should never be empty and the serverName *should* match the 'Legacy Admin Component' below</li>"
         $server = $sysManagerLocation.ToString().split('/')[2].split(':')[0]
         $sysManagerLocation1=  $sysManagerLocation.ToString()
-        $finding.Description+="<ul>`$ssa.SystemManagerLocations = " + "<span style='color:#ffd700'>" + $sysManagerLocation1 + "</span></ul><br/>"
+        $finding.Description+=" - The 'SystemManagerLocations' is associated with the 'non-legacy' piece of the AdminComponent. </br> - This value should never be empty and the serverName *should* match the 'Legacy Admin Component' below.</br> <ul>`$ssa.SystemManagerLocations = " + "<span style='color:#ffd700'>" + $sysManagerLocation1 + "</span></ul>"
     }
     if($null -eq $LAC.ServerName)
     {
@@ -6588,7 +6892,7 @@ function Get-SPDiagnosticsSSACDProp
     $conn = New-Object System.Data.SqlClient.SqlConnection
     $cmd = New-Object System.Data.SqlClient.SqlCommand
     
-    $adminDb = Get-SPDatabase | Where-Object{$_.Name -eq $searchapplication.SearchAdminDatabase.Name}
+    $adminDb = $script:spDatabases | Where-Object{$_.Name -eq $searchapplication.SearchAdminDatabase.Name}
     $connectionString = $adminDb.DatabaseConnectionString
     $conn.ConnectionString = $connectionString
     $conn.Open()
@@ -6614,7 +6918,7 @@ function Get-SPDiagnosticsSSACDProp
             }
             else
             {
-                $finding.Description+=("<li>" + "  This SSA's ContentDistributor Property is:" + "</li>")
+                $finding.Description+=(" - This SSA's ContentDistributor Property is: ")
                 #Split the list first, then handle each server
                 $CDistribs = $row.split(',')
                 foreach ($cdistrib in $CDistribs)
@@ -6806,7 +7110,7 @@ LEFT OUTER JOIN MSSCrawlHistory History
     $adminCmd  = New-Object System.Data.SqlClient.SqlCommand
 
     try {
-        $adminDb = Get-SPDatabase | Where-Object { $_.Name -eq $searchApplication.SearchAdminDatabase.Name }
+        $adminDb = $script:spDatabases | Where-Object { $_.Name -eq $searchApplication.SearchAdminDatabase.Name }
 
         $adminConn.ConnectionString = $adminDb.DatabaseConnectionString
         $adminConn.Open()
@@ -6821,7 +7125,7 @@ LEFT OUTER JOIN MSSCrawlHistory History
     }
     #endregion
 
-    #region Convert SQL rows → PSObjects
+    #region Convert SQL rows Ã¢â€ â€™ PSObjects
     $fulldata = @()
 
     if ($reader.HasRows) {
@@ -6852,6 +7156,100 @@ LEFT OUTER JOIN MSSCrawlHistory History
     # Output into your diagnostic wrapper
     $crawlHistoryFinding.InputObject = $fulldata
     return $crawlHistoryFinding
+}
+
+function Get-SPDiagnosticsSSASchemaMappings
+{
+    [CmdletBinding()]
+    Param(
+        [Parameter(Mandatory = $true)]
+        [Object]
+        $searchApplication
+    )
+
+    $finding = New-DiagnosticFinding -Name "Schema Mappings" -InputObject $null -Format Table
+    $finding.Description += "- These are the current crawled : managed property mappings. They are directly pulled from SQL tables. </br>- We do this so we can see Schema Id's. SSA Level is '0', anything other than that means schema mappings exist at the Site level"
+
+    $queryText = @'
+Select sm.PID, mp.FriendlyName, sm.MappingOrder, sm.CrawledPropertyId, cp.PropertyName, cp.Propset, sm.SchemaId from MSSSchemaPropertyMappings sm, MSSManagedProperties mp, MSSCrawledProperties cp WHERE sm.PID = mp.PID AND sm.CrawledPropertyId = cp.CrawledPropertyId Order By PID, MappingOrder
+'@
+
+    #region Database connection
+    $conn = New-Object System.Data.SqlClient.SqlConnection
+    $cmd  = New-Object System.Data.SqlClient.SqlCommand
+
+    try
+    {
+        $adminDb = $script:spDatabases | Where-Object { $_.Name -eq $searchApplication.SearchAdminDatabase.Name }
+        $conn.ConnectionString = $adminDb.DatabaseConnectionString
+        $conn.Open()
+
+        $cmd.Connection  = $conn
+        $cmd.CommandText = $queryText
+
+        $reader = $cmd.ExecuteReader()
+    }
+    catch
+    {
+        Write-Host $_
+    }
+    #endregion
+
+    #region Convert SQL rows -> PSObjects
+    $fulldata = @()
+
+    if ($reader.HasRows)
+    {
+        # Get column names once
+        $columns = for ($i = 0; $i -lt $reader.FieldCount; $i++)
+        {
+            $reader.GetName($i)
+        }
+
+        # Build objects row-by-row
+        while ($reader.Read())
+        {
+            $obj = [PSCustomObject]@{}
+
+            foreach ($col in $columns)
+            {
+                $obj | Add-Member -NotePropertyName $col -NotePropertyValue $reader[$col]
+            }
+
+            $fulldata += $obj
+        }
+    }
+
+    # Cleanup
+    $reader.Close()
+    $conn.Close()
+    #endregion
+
+    # Consolidate to one row per PID (PID + FriendlyName shown once, since both are 1:1 with the
+    # managed property). Each crawled-property mapping's columns are stacked in parallel using the
+    # ~~~BR~~~ sentinel (<br/> in HTML, " | " in text), matching "Service Instances on Server(s)".
+    if ($fulldata.Count -gt 0)
+    {
+        $groupedMappings = @()
+        foreach ($pidGroup in ($fulldata | Group-Object PID))
+        {
+            $groupedMappings += [PSCustomObject]@{
+                PID               = $pidGroup.Name
+                FriendlyName      = $pidGroup.Group[0].FriendlyName
+                MappingOrder      = (($pidGroup.Group | ForEach-Object {$_.MappingOrder})      -join '~~~BR~~~')
+                CrawledPropertyId = (($pidGroup.Group | ForEach-Object {$_.CrawledPropertyId}) -join '~~~BR~~~')
+                PropertyName      = (($pidGroup.Group | ForEach-Object {$_.PropertyName})      -join '~~~BR~~~')
+                Propset           = (($pidGroup.Group | ForEach-Object {$_.Propset})           -join '~~~BR~~~')
+                SchemaId          = (($pidGroup.Group | ForEach-Object {$_.SchemaId})          -join '~~~BR~~~')
+            }
+        }
+        $finding.InputObject = $groupedMappings
+    }
+    else
+    {
+        $finding.InputObject = $fulldata
+    }
+    return $finding
 }
 
 function Get-SPDiagnosticsSSAContentSources
@@ -7027,10 +7425,20 @@ function Get-SPDiagnosticsSSAContentSources
 
         if(!$contentSrc.EnableContinuousCrawls -and [string]::IsNullOrEmpty($contentSrc.FullCrawlSchedule.Description) -and [string]::IsNullOrEmpty($contentSrc.IncrementalCrawlSchedule.Description))
         {
-            ##No crawls are enabled, make a finding severit
-            $csSchedFinding.Severity = [SPDiagnostics.Severity]::Informational
-            $csSchedFinding.Description += "No crawl schedules found for this content source, without a valid crawl schedule content will not be indexed"
-            $csSchedFinding.ReferenceLink += [uri]"https://learn.microsoft.com/en-us/sharepoint/search/add-edit-or-delete-a-content-source"
+            # No scheduled or continuous crawl configured. Instead of promoting one Informational
+            # finding per content source, accumulate the SSA + content source into a single farm-wide
+            # consolidated finding built in Get-SPDiagnosticSearchFindings after the SSA loop.
+            if($null -eq $script:NoScheduledCrawlContentSources)
+            {
+                $script:NoScheduledCrawlContentSources = @()
+            }
+            $script:NoScheduledCrawlContentSources += [PSCustomObject]@{
+                "Search Service Application" = $($SearchApplication.Name)
+                "Content Source"             = $($contentSrc.Name)
+                "Type"                       = $($contentSrc.Type)
+                "Full Crawl Schedule"        = $($contentSrc.FullCrawlSchedule.Description)
+                "Incremental Crawl Schedule" = $($contentSrc.IncrementalCrawlSchedule.Description)
+            }
         }
 
         if( ($contentSrc.IncrementalCrawlSchedule.RepeatInterval -gt 0) -and ($contentSrc.IncrementalCrawlSchedule.RepeatInterval -le 5) )
@@ -7183,9 +7591,7 @@ function Get-SPDiagnostictsSSAQueryAuthority ($searchApplication)
     }
     if ($AuthDemotedSites.Count -gt 0)
     {
-        $AuthDemotedFinding.Description +="Promoted pages get a higher Ranking in Search results, the lower the level the higher the ranking."
-        $AuthDemotedFinding.Description +="The less clicks it takes to get from a promoted site to a url in search results the higher the ranking."
-        $AuthDemotedFinding.Description +="Demoted Urls receive a lower ranking"
+        $AuthDemotedFinding.Description +=" - Promoted pages get a higher Ranking in Search results, the lower the level the higher the ranking.</br> - The less clicks it takes to get from a promoted site to a url in search results the higher the ranking.</br> - Demoted Urls receive a lower ranking"
         $AuthDemotedFinding.InputObject = $AuthDemotedSites
         return $AuthDemotedFinding
     }
@@ -7285,7 +7691,7 @@ function Get-SPDiagnosticsSSACrawlPolicies
         }
         if ($CrawlPolicyColl.ContinuousCrawlInterval -lt 10)
         {
-            $crawlPolicyFinding.WarningMessage += "Continous Crawling Interval is set low: $($CrawlPolicyColl.ContinuousCrawlInterval) minutes. This can cause high resource utilization on the farm."
+            $crawlPolicyFinding.WarningMessage += "Continuous Crawling Interval is set low: $($CrawlPolicyColl.ContinuousCrawlInterval) minutes. This can cause high resource utilization on the farm."
             $crawlPolicyFinding.Severity = [SPDiagnostics.Severity]::Warning       
         }
         else
@@ -7400,8 +7806,7 @@ function Get-SPDiagnosticsSSASearchService
 <tr><td>BypassArrayList</td><td>{<span style='color: #ffd700;'>$($proxyArrayList)</span>}</td></tr>
 </table>
 "@
-        $finding.Description+="<li>The Search Service has a Web Proxy defined.</li>"
-        $finding.Description+="<li>This will impact ALL SSA's and route crawl traffic to the Proxy regardless if the 'IE settings' or 'netsh winhttp show proxy' are defined</li>"
+        $finding.Description+="- The Search Service has a Web Proxy defined.</br>- This will impact ALL SSA's and route crawl traffic to the Proxy regardless if the 'IE settings' or 'netsh winhttp show proxy' are defined"
         $finding.Description+='<ul>' + $webProxyText + '</ul>'
     }
     $finding.ChildFindings.Add((Get-SPDiagnosticsCrawlerImpactRules))
@@ -7417,7 +7822,7 @@ function Get-SPDiagnosticsCrawlerImpactRules
         $CIfinding = New-DiagnosticFinding -Name "Crawler Impact Rules" -InputObject $null -format table
         $CIfinding.Description +="By default SharePoint requests 8 items in parallel when crawling. This can be influenced with Crawler Impact Rules.<BR>"
         $CIfinding.Description +="The HitRate for Simultaneous Requests changes the number of items requested in parallel.<BR>"
-        $CIfinding.Description +="When DelayBetweenRequests is specifice, a single item is requested, then a delay of seconds specifice with HitRate is made before the next item is requested.<BR>"
+        $CIfinding.Description +="When DelayBetweenRequests is specified, a single item is requested, then a delay of seconds specified with HitRate is made before the next item is requested.<BR>"
     
         $CiRules2 = @()
         foreach ($ciRule in $CiRules)
@@ -7450,7 +7855,7 @@ function Get-SPDiagnosticsSSASearchInstances
     )
 
     $problemSearchInstanceColl = @()
-    foreach($ssa in $SSAs)
+    foreach($ssa in $searchApps)
     {
         $at = Get-SPEnterpriseSearchTopology -SearchApplication $ssa -Active
         $topoCompList = Get-SPEnterpriseSearchComponent -SearchTopology $at
@@ -7476,16 +7881,12 @@ function Get-SPDiagnosticsSSASearchInstances
     if($problemSearchInstanceColl.Count -gt 0)
     {
         $ssiFinding.Severity = [SPDiagnostics.Severity]::Critical
-        $ssiFinding.WarningMessage = "One or more SearchServiceInstances or HostController Instances are not online "
-        $ssiFinding.Description+=("<li>These Service Instances are critical for search to function properly.</li>")
-        $ssiFinding.Description+=("<li> If these are Disabled or stuck in a state other than 'Online', then we need to try to start them again to bring to a proper state.</li>")
-        $ssiFinding.Description+=("<li> To correct this, consider the following PowerShell command:  </li>")
-        $ssiFinding.Description+=('<ul style="color:#ffd700">' + " Start-SPEnterpriseSearchServiceInstance 'serverName'" + "</ul>")
+        $ssiFinding.WarningMessage = " - One or more 'SearchServiceInstance's or 'HostController Instances' are not online "
+        $ssiFinding.Description += " - These Service Instances are critical for search to function properly.<br/> - If these are Disabled or stuck in a state other than 'Online', then we need to try to start them again to bring to a proper state.<br/> - To correct this, consider the following PowerShell command:<br/> <span style='color:#ffd700;'>Start-SPEnterpriseSearchServiceInstance 'serverName'</span>"
     }
     else
     {
         return $null
-        #$ssiFinding.Description+=('<ul style="color:green"> All of the Search related Service Instances are Online!</ul>')
     }
     return $ssiFinding
 }
@@ -7500,20 +7901,9 @@ function Get-SPDiagnosticsSSPJobInstances
     )
 
     $farm = [Microsoft.SharePoint.Administration.SPFarm]::Local
-    $farmSspJob = $farm.Services | Where-Object {$_.GetType().Name -like "OfficeServerService"}
     $problemSspJobInstanceColl = @()
-    if($farmSspJob.Status -ne [Microsoft.SharePoint.Administration.SPObjectStatus]::Online)
-    {
-        $problemSspJobInstanceColl+=[PSCustomObject]@{
-            Server = 'Farm Level  '
-            TypeName = $farmSspJob.TypeName
-            Status = $farmSspJob.Status
-            Id = $farmSspJob.Id
-        }
-        
-    }
 
-    foreach($ssa in $SSAs)
+    foreach($ssa in $searchApps)
     {
         $at = Get-SPEnterpriseSearchTopology -SearchApplication $ssa -Active
         $topoCompList = Get-SPEnterpriseSearchComponent -SearchTopology $at
@@ -7539,17 +7929,13 @@ function Get-SPDiagnosticsSSPJobInstances
     {
 
         $sspJobFinding.Severity = [SPDiagnostics.Severity]::Critical
-        $sspJobFinding.WarningMessage = "One or more 'SSP Job Control' Service Instances are not online "
-        $sspJobFinding.Description+=("<li>These Service Instances are critical for search to function properly. They are responsible for allowing the timer jobs, job-application-server-*, to run.</li>")
-        $sspJobFinding.Description+=("<li> Those timer jobs 'sync' search related data, so they need to be Online and those jobs need to be running every 1 min</li>")
-        $sspJobFinding.Description+=("<li> To get these back 'Online', run the following PowerShell commands:  </li>")
-        $sspJobFinding.Description+=("<ul style='color:#ffd700'><div class=`"code`">`$farm = Get-SPFarm<br>`$obj = `$farm.GetObject('guidOfDisabledInstance')<br>`$obj.Status = 'Online'<br>`$obj.Update()</div></ul>")
+        $sspJobFinding.WarningMessage = " - One or more 'SSP Job Control' Service Instances are not online "
+        $sspJobFinding.Description+=(" - These Service Instances are critical for search to function properly. They are responsible for allowing the timer jobs, job-application-server-*, to run.</br> - Those timer jobs 'sync' search related data, so they need to be Online and those jobs need to be running every 1 min.</br> - To get these back 'Online', run the following PowerShell commands: </br> <ul style='color:#ffd700'><div class=`"code`">`$farm = Get-SPFarm<br>`$obj = `$farm.GetObject('guidOfDisabledInstance')<br>`$obj.Status = 'Online'<br>`$obj.Update()</div></ul>")
         
     }
     else
     {
         return $null
-        #$sspJobFinding.Description+=('<ul style="color:green"> All of the SSP Job Control Service Instances are Online</ul>')
     }
     return $sspJobFinding
 }
@@ -7563,7 +7949,7 @@ function Get-SPDiagnosticsCheckForRoot
         $searchApps
     )
 
-    foreach($ssa in $SSAs)
+    foreach($ssa in $searchApps)
     {
         $at = Get-SPEnterpriseSearchTopology -SearchApplication $ssa -Active
         $topoCompList = Get-SPEnterpriseSearchComponent -SearchTopology $at
@@ -7601,10 +7987,8 @@ function Get-SPDiagnosticsCheckForRoot
         {
             # We're missing some root findings so set the severity to Critical and set the warning message and description
             $cRootFinding.Severity = [SPDiagnostics.Severity]::Critical
-            $cRootFinding.WarningMessage = "One or more Servers are missing the 'C:\root' folder"
-            $cRootFinding.Description += ("<li> Each server in the Search Topology should have the 'c:\root' folder, unless you only have the 'CrawlComponent' on this search server.</li>")
-            $cRootFinding.Description += ("<li> If the 'C:\root' is missing, your SSA will not provision.</li>")
-            $cRootFinding.Description += ("<li> If you are missing this folder, you will need to delete the SSA you tried to create\provision, manually create the 'c:\root' on the server and re-create the SSA</li><br/>")
+            $cRootFinding.WarningMessage = " - One or more Servers are missing the 'C:\root' folder"
+            $cRootFinding.Description += " - Each server in the Search Topology should have the 'c:\root' folder, unless you only have the 'CrawlComponent' on this search server.<br/> - If the 'C:\root' is missing, your SSA will not provision.<br/> - If you are missing this folder, you will need to delete the SSA you tried to create\provision, manually create the 'c:\root' on the server and re-create the SSA.<br/>"
         }
         else
         {
@@ -7662,7 +8046,7 @@ function Get-SPDiagnosticsIndexDiskSpace ($SearchApplication)
 
         If ($IndexSizeRatio -lt 1.5)
         {
-            $SSAIndexDiskSpaceFinding.WarningMessage +="The disk " + $serverDiskInfo.DeviceID +  "on the server " + $sdi.Computer + " does not have 1.5 x the size of the index as free disk space. This is required for successfull master merge of the index."
+            $SSAIndexDiskSpaceFinding.WarningMessage +="The disk " + $serverDiskInfo.DeviceID +  "on the server " + $sdi.Computer + " does not have 1.5 x the size of the index as free disk space. This is required for successful master merge of the index."
             $SSAIndexDiskSpaceFinding.Severity= [SPDiagnostics.Severity]::Critical
         } elseif ($IndexSizeRatio -lt 2.5)
         {
@@ -7798,7 +8182,8 @@ Function VerifyHostControllerRepository
                 $SHCS += $shc
             }
 
-            $VerifyHostControllerRepositoryFinding.Description += "<ul>Primary search host controller (for dictionary repository): $primaryHC</ul>"
+            $VerifyHostControllerRepositoryFinding.Description += "Primary search host controller (for dictionary repository): <strong>$primaryHC</strong>"
+            $VerifyHostControllerRepositoryFinding.Description += " - The Host Controller Repository is the search configuration and linguistic resources repository maintained by the SharePoint Search Host Controller service. </br>- Its role is to distribute and synchronize the files and metadata required for search components (especially language-processing resources) across all search servers in the farm, ensuring consistent search behavior and search component management."
             $VerifyHostControllerRepositoryFinding.InputObject = ($SHCS | select-object Server, PrimaryHostController, Status, Id, RepositoryVersion | Sort-Object PrimaryHostController -Descending)
             
             if ($primaryRepVer -eq -1)
@@ -7833,6 +8218,329 @@ Function VerifyHostControllerRepository
 #endregion
 
 #region HealthCheck
+
+# ----------------------------------------------------------------------------------------------------------------------
+# Search System / Master Merge Diagnostics
+# ----------------------------------------------------------------------------------------------------------------------
+# The three functions below reproduce - natively, with no dependency on the SRx module - the two tables that the
+# SRx "Get-SRxIndexReports -ssa $xssa -DiskReport" command prints:
+#     "Indexing System Diagnostics"  and  "Master Merge Diagnostics"
+# All per-replica values come from Get-SPEnterpriseSearchStatus -HealthReport (the same plugin-health entries SRx
+# parses) plus the on-disk index-size / free-space pattern already used by Get-SPDiagnosticsIndexDiskSpace.
+# ----------------------------------------------------------------------------------------------------------------------
+
+function Format-SPSearchIndexSize
+{
+    # Formats a byte count using the supplied size decorator (GB/MB/KB) as "{N0} {unit}".
+    # Any non-numeric value (e.g. the literal string 'Unknown' or $null) is passed through as "Unknown",
+    # mirroring how SRx renders index/disk values that could not be collected.
+    param(
+        $Bytes,
+        [ValidateSet("GB","MB","KB")][string]$Decorator = "MB"
+    )
+
+    if ($null -eq $Bytes -or $Bytes -is [string]) { return "Unknown" }
+
+    switch ($Decorator)
+    {
+        "GB"    { $unit = 1GB }
+        "KB"    { $unit = 1KB }
+        default { $unit = 1MB }
+    }
+    return ("{0:N0} {1}" -f ($Bytes / $unit), $Decorator)
+}
+
+function New-SPSearchIndexDiagFinding
+{
+    # Pure renderer: projects the per-replica objects produced by Get-SPSearchIndexReplicaReport into a parent
+    # finding that holds two Table child findings mirroring the SRx report. Kept free of any SharePoint calls so
+    # it can be unit-tested / previewed with mock data.
+    param(
+        [Parameter(Mandatory=$true)]
+        $Replicas,
+
+        [ValidateSet("GB","MB","KB")]
+        [string]$SizeDecorator = "MB"
+    )
+
+    $replicaArray = @($Replicas)
+    if ($replicaArray.Count -eq 0) { return $null }
+
+    # ---- Indexing System Diagnostics (docs / generation / merge state - no disk access required) ----
+    $systemRows = @()
+    foreach ($r in $replicaArray)
+    {
+        $systemRows += [pscustomobject][ordered]@{
+            "ServerName"  = $r.ServerName
+            "Name"        = $r.Name
+            "Cell"        = $r.Cell
+            "Part"        = $r.Part
+            "State"       = $r.State
+            "Primary"     = $r.Primary
+            "Generation"  = ("{0:N0}" -f [long]$r.Generation)
+            "Docs(+dups)" = ("{0:N0}" -f [long]$r.TotalDocs)
+            "Searchable"  = ("{0:N0}" -f [long]$r.ActiveDocs)
+            "AvgDoc"      = $(if ($r.AvgDocSize -is [string]) { "Unknown" } else { ("{0:N0} KB" -f ($r.AvgDocSize / 1KB)) })
+            "Merging"     = $r.Merging
+            "Checkpoint"  = (Format-SPSearchIndexSize -Bytes $r.CheckpointSize -Decorator $SizeDecorator)
+        }
+    }
+    $systemFinding = New-DiagnosticFinding -Name "Indexing System Diagnostics" -Severity Default -InputObject $systemRows -Format Table
+
+    # ---- Master Merge Diagnostics (checkpoint + disk-based master-merge size estimates) ----
+    $mergeRows = @()
+    foreach ($r in $replicaArray)
+    {
+        $mergeRows += [pscustomobject][ordered]@{
+            "ServerName"   = $r.ServerName
+            "Name"         = $r.Name
+            "Cell"         = $r.Cell
+            "Part"         = $r.Part
+            "Checkpoint"   = (Format-SPSearchIndexSize -Bytes $r.CheckpointSize -Decorator $SizeDecorator)
+            "Index Files"  = (Format-SPSearchIndexSize -Bytes $r.FileSize       -Decorator $SizeDecorator)
+            "MM (Est.)"    = (Format-SPSearchIndexSize -Bytes $r.EstMMTotal      -Decorator $SizeDecorator)
+            "MM (Pending)" = (Format-SPSearchIndexSize -Bytes $r.EstMMPending    -Decorator $SizeDecorator)
+            "Free Space"   = (Format-SPSearchIndexSize -Bytes $r.FreeSpace       -Decorator $SizeDecorator)
+            "%(MM/Free)"   = $(if ($r.PctMMFree -is [string]) { "Unknown" } else { ("{0:N2} %" -f [decimal]$r.PctMMFree) })
+        }
+    }
+    $mergeFinding = New-DiagnosticFinding -Name "Master Merge Diagnostics" -Severity Default -InputObject $mergeRows -Format Table
+
+    # A master merge can fail and bloat the index if the index volume does not have at least 1.5x the
+    # checkpoint size in free space. Flag any reachable replica that falls below that threshold.
+    foreach ($r in $replicaArray)
+    {
+        if (($r.CheckpointSize -isnot [string]) -and ([long]$r.CheckpointSize -gt 0) -and ($r.FreeSpace -isnot [string]))
+        {
+            $requiredFree = [long](1.5 * [long]$r.CheckpointSize)
+            if ([long]$r.FreeSpace -lt $requiredFree)
+            {
+                $ratio = [math]::Round(([long]$r.FreeSpace / [long]$r.CheckpointSize), 2)
+                # Below 1x the checkpoint a master merge cannot complete (Critical); 1x-1.5x is at risk (Warning).
+                if ([long]$r.FreeSpace -lt [long]$r.CheckpointSize) { $mergeFinding.Severity = [SPDiagnostics.Severity]::Critical }
+                else { $mergeFinding.Severity = [SPDiagnostics.Severity]::Warning }
+                $mergeFinding.WarningMessage += ("{0} ({1}): index volume free space is {2}, but a master merge needs at least 1.5x the checkpoint ({3}). Only {4}x the checkpoint is free - a master merge may fail and bloat the index." -f `
+                    $r.ServerName, $r.Name, `
+                    (Format-SPSearchIndexSize -Bytes $r.FreeSpace -Decorator $SizeDecorator), `
+                    (Format-SPSearchIndexSize -Bytes $requiredFree -Decorator $SizeDecorator), `
+                    $ratio)
+            }
+        }
+    }
+
+    $parent = New-DiagnosticFinding -Name "Indexing System and Master Merge Diagnostics" -Severity Default -InputObject $null -Format List -ReferenceLink "https://learn.microsoft.com/en-us/sharepoint/search/manage-the-search-index"
+    $parent.Description += "Per index-replica system diagnostics and master-merge disk estimates, ported from the SRx Get-SRxIndexReports report (Indexing System Diagnostics and Master Merge Diagnostics sections)."
+    $parent.ChildFindings.Add($systemFinding)
+    $parent.ChildFindings.Add($mergeFinding)
+    return $parent
+}
+
+function Get-SPSearchIndexReplicaReport
+{
+    # Collects per index-replica diagnostics for the given SSA (the raw data behind the two tables above).
+    # Docs/generation/checkpoint/merge state come from Get-SPEnterpriseSearchStatus -HealthReport; on-disk index
+    # size and volume free space use the same UNC + win32_LogicalDisk approach as Get-SPDiagnosticsIndexDiskSpace.
+    # Any disk value that cannot be collected (server/path unreachable) degrades to the string 'Unknown'.
+    param(
+        [Parameter(Mandatory=$true)]
+        $SearchApplication,
+
+        [Parameter(Mandatory=$true)]
+        $ComponentStateList,
+
+        [Parameter(Mandatory=$false)]
+        $TopologyComponentList
+    )
+
+    # SP2013 stores the checkpoint health value in bytes and needs a 2.5x master-merge overhead factor;
+    # SP2016+ stores it in MB and needs only ~1.5x.
+    $isSP2016OrLater = $true
+    try { $isSP2016OrLater = ([Microsoft.SharePoint.Administration.SPFarm]::Local.BuildVersion.Major -ge 16) } catch { $isSP2016OrLater = $true }
+
+    # ServerName, IndexPartitionOrdinal and RootDirectory live on the topology COMPONENT objects
+    # (Get-SPEnterpriseSearchComponent) - NOT on the status objects (Get-SPEnterpriseSearchStatus), which
+    # only carry Name/State/Details. Build a Name -> component lookup so we can join them.
+    if ($null -eq $TopologyComponentList)
+    {
+        try
+        {
+            $activeTopo = Get-SPEnterpriseSearchTopology -SearchApplication $SearchApplication -Active -ErrorAction SilentlyContinue
+            $TopologyComponentList = Get-SPEnterpriseSearchComponent -SearchTopology $activeTopo -ErrorAction SilentlyContinue
+        }
+        catch { $TopologyComponentList = @() }
+    }
+    $componentByName = @{}
+    foreach ($tc in $TopologyComponentList) { if ($tc.Name) { $componentByName[$tc.Name] = $tc } }
+
+    $replicas = @()
+
+    foreach ($comp in $ComponentStateList)
+    {
+        if ($comp.Name -notmatch "Index") { continue }
+        if ($comp.Name -match "Cell")     { continue }
+        if ($comp.State -match "Unknown" -or $comp.State -match "Registering") { continue }
+
+        $componentName = $comp.Name
+        $topoComp      = $componentByName[$componentName]
+
+        # ServerName / partition / RootDirectory come from the matching topology component object
+        $serverName = $null
+        $partition  = $null
+        $rootDir    = $null
+        if ($topoComp)
+        {
+            $serverName = $topoComp.ServerName
+            $partition  = $topoComp.IndexPartitionOrdinal
+            $rootDir    = $topoComp.RootDirectory
+        }
+        # Fall back to the status object's Details dictionary if the component wasn't matched
+        if ([string]::IsNullOrEmpty($serverName) -and $comp.Details) { try { if ($comp.Details["Host"]) { $serverName = $comp.Details["Host"] } } catch {} }
+        if (($null -eq $partition) -and $comp.Details) { try { if ($comp.Details["Partition"]) { $partition = $comp.Details["Partition"] } } catch {} }
+
+        # ----- Plugin health report for this index replica -----
+        $health = $null
+        try { $health = Get-SPEnterpriseSearchStatus -SearchApplication $SearchApplication -HealthReport -Component $componentName -ErrorAction SilentlyContinue } catch { $health = $null }
+
+        $generation = 0
+        $checkpoint = 0
+        $totalDocs  = 0
+        $activeDocs = 0
+        $merging    = $false
+        $cellNumber = "?"
+
+        if ($health)
+        {
+            $genEntry = $health | Where-Object { $_.Name -and $_.Name.StartsWith("plugin: newest generation id") } | Select-Object -First 1
+            if ($genEntry) { $generation = [long]$genEntry.Message }
+
+            $cpEntry = $health | Where-Object { $_.Name -and $_.Name.StartsWith("plugin: size of newest checkpoint") } | Select-Object -First 1
+            if ($cpEntry)
+            {
+                if ($isSP2016OrLater) { $checkpoint = [long]$cpEntry.Message * 1MB } else { $checkpoint = [long]$cpEntry.Message }
+            }
+
+            $totalDocs = ($health | Where-Object { $_.Name -and $_.Name.StartsWith("part: number of documents including duplicate") } | ForEach-Object { [long]$_.Message } | Measure-Object -Sum).Sum
+            if ($null -eq $totalDocs) { $totalDocs = 0 }
+
+            $adEntry = $health | Where-Object { $_.Name -and $_.Name.StartsWith("plugin: number of documents") } | Select-Object -First 1
+            if ($adEntry) { $activeDocs = [long]$adEntry.Message }
+
+            $mmEntry = $health | Where-Object { $_.Name -and $_.Name.StartsWith("plugin: master merge running") } | Select-Object -First 1
+            if ($mmEntry) { $merging = ($mmEntry.Message.ToString().ToLower() -eq 'true') }
+
+            $initEntry = $health | Where-Object { $_.Name -and $_.Name.StartsWith("plugin: initialized[SP") } | Select-Object -First 1
+            if ($initEntry)
+            {
+                $parts = $initEntry.Name -split '\.'
+                if ($parts.Count -ge 3) { $cellNumber = $parts[2] }
+            }
+        }
+
+        if ([string]::IsNullOrEmpty($cellNumber)) { $cellNumber = "?" }
+        $cellName = "[I.{0}.{1}]" -f $cellNumber, $partition
+
+        $avgDocSize = if ([long]$totalDocs -gt 0) { [long][math]::Ceiling($checkpoint / [long]$totalDocs) } else { 0 }
+
+        # ----- Primary replica flag: read from the status object's Details dictionary (SRx's _JunoDetails.Primary),
+        #       falling back to the -Primary -Component query if Details is unavailable -----
+        $primary = $false
+        $primaryResolved = $false
+        if ($comp.Details)
+        {
+            try
+            {
+                foreach ($kv in $comp.Details.GetEnumerator())
+                {
+                    if ($kv.Key -ieq 'Primary')
+                    {
+                        $primary = ($kv.Value.ToString().ToLower() -eq 'true')
+                        $primaryResolved = $true
+                        break
+                    }
+                }
+            }
+            catch { $primaryResolved = $false }
+        }
+        if (-not $primaryResolved)
+        {
+            try { if (Get-SPEnterpriseSearchStatus -SearchApplication $SearchApplication -Primary -Component $componentName -ErrorAction SilentlyContinue) { $primary = $true } } catch { $primary = $false }
+        }
+
+        # ----- Best-effort on-disk index size + volume free space (same approach as Get-SPDiagnosticsIndexDiskSpace) -----
+        $fileSize  = 'Unknown'
+        $freeSpace = 'Unknown'
+        try
+        {
+            if ([string]::IsNullOrEmpty($rootDir)) { $rootDir = $SearchApplication.AdminComponent.IndexLocation }
+            if (-not [string]::IsNullOrEmpty($rootDir))
+            {
+                $indexUnc   = "\\" + $serverName + "\" + $rootDir.Replace(":","$")
+                $indexDrive = $rootDir.Substring(0,2)
+
+                if (Test-Path $indexUnc)
+                {
+                    [long]$script:TotalSize = 0
+                    Get-DirectorySizeRecursive -LiteralPath $indexUnc
+                    $fileSize = [long]$script:TotalSize
+                }
+
+                $wmiQuery = "select * from win32_LogicalDisk where DriveType=3 and DeviceID ='" + $indexDrive + "'"
+                $disk = Get-WmiObject -Query $wmiQuery -ComputerName $serverName -ErrorAction SilentlyContinue
+                if ($disk -and $disk.FreeSpace) { $freeSpace = [long]$disk.FreeSpace }
+            }
+        }
+        catch
+        {
+            $fileSize  = 'Unknown'
+            $freeSpace = 'Unknown'
+        }
+
+        # ----- Master-merge size estimates (SRx formula) -----
+        $estMMTotal   = 'Unknown'
+        $estMMPending = 'Unknown'
+        $pctMMFree    = 'Unknown'
+        if ($checkpoint -gt 0)
+        {
+            $overhead = if ($isSP2016OrLater) { $checkpoint * 0.5 } else { $checkpoint * 1.5 }
+            # SP2013 worst-case: if not merging and the on-disk index already exceeds the overhead, use the file size
+            if ((-not $isSP2016OrLater) -and ($fileSize -isnot [string]) -and (-not $merging) -and ($fileSize -gt $overhead)) { $overhead = $fileSize }
+            $estMMTotal = [long]($checkpoint + $overhead)
+
+            if ($fileSize -isnot [string])
+            {
+                $pending = $estMMTotal - $fileSize
+                if ($pending -le 0) { $estMMPending = 'Unknown' } else { $estMMPending = [long]$pending }
+            }
+
+            if (($freeSpace -isnot [string]) -and ($estMMPending -isnot [string]) -and ([long]$freeSpace -gt 0))
+            {
+                $pctMMFree = [decimal]::Round(($estMMPending / $freeSpace), 4) * 100
+            }
+        }
+
+        $replicas += [pscustomobject]@{
+            ServerName     = $serverName
+            Name           = $componentName
+            Cell           = $cellName
+            Part           = $partition
+            State          = $comp.State
+            Primary        = $primary
+            Generation     = $generation
+            TotalDocs      = $totalDocs
+            ActiveDocs     = $activeDocs
+            AvgDocSize     = $avgDocSize
+            Merging        = $merging
+            CheckpointSize = $checkpoint
+            FileSize       = $fileSize
+            FreeSpace      = $freeSpace
+            EstMMTotal     = $estMMTotal
+            EstMMPending   = $estMMPending
+            PctMMFree      = $pctMMFree
+        }
+    }
+
+    return $replicas
+}
 
 function Get-SPDiagnosticsSearchHealthCheck()
 {
@@ -8600,7 +9308,7 @@ function Get-SPDiagnosticsSearchHealthCheck()
             }
             
             $VerifyHaLimitsDiagnosticFinding.Description += "- It has been detected that there are search components, in the topology, that has more than 1 component.<br/>- If you have more than 1 component for some components, but only 1 of others, we will flag this check. <br/>- We will also flag if you have multiple components and 1 or more of (x) components are down.<br/>"
-            $VerifyHaLimitsDiagnosticFinding.Description += "- In a 'High Availabilty' setup, search should be able to function with minimal impact if you have a redundancy of components.<br/>"
+            $VerifyHaLimitsDiagnosticFinding.Description += "- In a 'High Availability' setup, search should be able to function with minimal impact if you have a redundancy of components.<br/>"
             $VerifyHaLimitsDiagnosticFinding.ReferenceLink += "https://learn.microsoft.com/en-us/SharePoint/administration/plan-for-high-availability"
             $VerifyHaLimitsDiagnosticFinding.InputObject = $hacl
         }
@@ -9017,6 +9725,15 @@ function Get-SPDiagnosticsSearchHealthCheck()
         $SearchTopologyHealthCheck.ChildFindings.Add($TopologyGridFinding)
     }
 
+    # Indexing System Diagnostics + Master Merge Diagnostics (ported from SRx Get-SRxIndexReports -DiskReport).
+    # Placed directly under "Search Application Topology" and before "Analytics Processing Job Status".
+    $indexReplicaReport = Get-SPSearchIndexReplicaReport -SearchApplication $script:ssa -ComponentStateList $script:componentStateList -TopologyComponentList $script:topologyCompList
+    if ($indexReplicaReport)
+    {
+        $indexDiagFinding = New-SPSearchIndexDiagFinding -Replicas $indexReplicaReport
+        if ($indexDiagFinding) { $SearchTopologyHealthCheck.ChildFindings.Add($indexDiagFinding) }
+    }
+
     #Only do these things if the primaryAdmin is set
     if($null -ne $script:primaryAdmin)
     {
@@ -9125,7 +9842,7 @@ function Get-SPDiagnosticsSearchHealthCheck()
             else
             {
                 $DegradedComponents.WarningMessage+= "        Index replicas listed as degraded but index generation is OK.</br>"
-                $DegradedComponents.WarningMessage+= "        Will get out of degraded state as soon as new/changed items are being idexed.</br>"
+                $DegradedComponents.WarningMessage+= "        Will get out of degraded state as soon as new/changed items are being indexed.</br>"
             }
         }
         $SearchTopologyHealthCheck.ChildFindings.Add($DegradedComponents)
@@ -9641,7 +10358,7 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
                 if(!$definition.UsageDatabaseEnabled -and $table -ne "AnalyticsUsage")
                 {
                     $definitionFinding.Severity = [SPDiagnostics.Severity]::Informational
-                    $definitionFinding.WarningMessage += "$tempName has UsageDatabaseEnabled set to False. This defaults to FALSE on most definitions but note, data will not be recorded to the $table partions in the Usage Database "
+                    $definitionFinding.WarningMessage += "$tempName has UsageDatabaseEnabled set to False. This defaults to FALSE on most definitions but note, data will not be recorded to the $table partitions in the Usage Database "
                 }
                 
                 $finding.ChildFindings.Add($definitionFinding)
@@ -10461,7 +11178,7 @@ function AzureFrontDoorCiphersEnabled ($ServerName)
     if($supportedCiphers.Count -le 0)
     {
         $afdFinding.Severity = [SPDiagnostics.Severity]::Warning
-        $afdFinding.WarningMessage += "No supported ciphers found to communicate with AFD. If hybrid functionlity is intending to be used, or currently being used, this should be addressed."
+        $afdFinding.WarningMessage += "No supported ciphers found to communicate with AFD. If hybrid functionality is intending to be used, or currently being used, this should be addressed."
     }
     else
     {
@@ -10907,10 +11624,10 @@ Function Get-OfficeOnlineServerFindings
         }
         $WopiBindingsFinding.InputObject = $DisplayWopiBindings
 
-        $WopiZone = new-Object PSObject 
-        $WopiZone | Add-Member -memberType NoteProperty -name "WopiZone" -Value $(Get-SPWopiZone)
-        $WopiZoneFinding = New-DiagnosticFinding -Name "WOPI Zone" -InputObject $($WopiZone) -Format List
+        $WopiZone = Get-SPWopiZone
+        $OfficeOnlineServerFindings.Description += "Farm WOPI zone: $WopiZone"
         
+        $WopiSuppressionsFinding = $null
         $WopiSuppressions = Get-SPWOPISuppressionSetting
         if ($WopiSuppressions)
         {
@@ -10924,11 +11641,9 @@ Function Get-OfficeOnlineServerFindings
                 $WopiSuppressionsReport+= $wsr
             }
 
-            $WopiSuppressions = New-DiagnosticFinding -Name "WOPI Suppressions" -InputObject $WopiSuppressionsReport -Format table
-            $WopiSuppressions.Description += "Office Web Apps are disabled for the action, file name extension, or programmatic identifier specified."
-            $WopiSuppressions.ReferenceLink += "https://learn.microsoft.com/en-us/powershell/module/sharepoint-server/new-spwopisuppressionsetting?view=sharepoint-server-ps"
-        } else {
-            $WopiSuppressions = New-DiagnosticFinding -Name "WOPI Suppressions" -InputObject $null -Format list -Description "No WOPI Supressions configured"
+            $WopiSuppressionsFinding = New-DiagnosticFinding -Name "WOPI Suppressions" -InputObject $WopiSuppressionsReport -Format table
+            $WopiSuppressionsFinding.Description += "Office Web Apps are disabled for the action, file name extension, or programmatic identifier specified."
+            $WopiSuppressionsFinding.ReferenceLink += "https://learn.microsoft.com/en-us/powershell/module/sharepoint-server/new-spwopisuppressionsetting?view=sharepoint-server-ps"
         }
 
         #Task 501: Removing connection tests due to perf
@@ -10953,8 +11668,10 @@ Function Get-OfficeOnlineServerFindings
         #>
 
         $OfficeOnlineServerFindings.ChildFindings.add(($WopiBindingsFinding))
-        $OfficeOnlineServerFindings.ChildFindings.add(($WopiZoneFinding)) 
-        $OfficeOnlineServerFindings.ChildFindings.add(($WopiSuppressions)) 
+        if ($WopiSuppressionsFinding)
+        {
+            $OfficeOnlineServerFindings.ChildFindings.add(($WopiSuppressionsFinding)) 
+        }
         #Task 501: Removing connection tests due to perf
         #$OfficeOnlineServerFindings.ChildFindings.add(($WopiConnectionTestFinding)) 
 
@@ -11098,16 +11815,16 @@ Function Get-SPDiagnosticFarmNetworkLatency()
         }
         elseif ($NetworkLatency.PingSucceeded -eq $false)
         {
-            $networklatencyFinding.WarningMessage +="Ping was not sucessful between servers '$($NetworkLatency.source)' and '$($NetworkLatency.Destination)'. Validate if there is no firewall blocking ping between the servers."            
+            $networklatencyFinding.WarningMessage +="Ping was not successful between servers '$($NetworkLatency.source)' and '$($NetworkLatency.Destination)'. Validate if there is no firewall blocking ping between the servers."            
         }
 
         if ($NetworkLatency.RoundTripTime -gt 5)
         {
-            $networklatencyFinding.WarningMessage +="The ping respose time between the servers '$($NetworkLatency.source)' and '$($NetworkLatency.Destination)' is way too high"            
+            $networklatencyFinding.WarningMessage +="The ping response time between the servers '$($NetworkLatency.source)' and '$($NetworkLatency.Destination)' is way too high"            
             $networklatencyFinding.Severity =  [SPDiagnostics.Severity]::Critical
         } elseif ($NetworkLatency.RoundTripTime -gt 2)
         {
-            $networklatencyFinding.WarningMessage +="The ping respose time between the servers '$($NetworkLatency.source)' and '$($NetworkLatency.Destination)' is too high"            
+            $networklatencyFinding.WarningMessage +="The ping response time between the servers '$($NetworkLatency.source)' and '$($NetworkLatency.Destination)' is too high"            
         }
     }
     return $NetworkLatencyFinding
@@ -11240,7 +11957,7 @@ function Get-MirroredDBsFinding
 {
     $MirroredDBFinding = New-DiagnosticFinding -Name "Mirrored Databases" -InputObject $null -Format Table
 
-    $MirrorDB= get-spdatabase | Where-Object {$_.FailoverServer -or $_.FailoverInstance} | Select-Object @{N='Name';E={$($_.Name)}}, @{N='server';E={$($_.server)}} , @{N='FailoverServer';E={$($_.FailoverServer.Name)}}
+    $MirrorDB= $script:spDatabases | Where-Object {$_.FailoverServer -or $_.FailoverInstance} | Select-Object @{N='Name';E={$($_.Name)}}, @{N='server';E={$($_.server)}} , @{N='FailoverServer';E={$($_.FailoverServer.Name)}}
     if ($MirrorDB.count -eq 0)
     {
         $MirroredDBFinding.Description += "No mirrored databases in the farm."
@@ -11257,7 +11974,7 @@ function Get-DBInfosFinding ($DBServer)
 {
     $DBInfosFinding = New-DiagnosticFinding -Name "Database Information" -InputObject $null -Format Table
         
-    $ServerDBS = get-spdatabase | Where-Object {($_.server.name -eq $dbServer) -or ($_.server -eq  $dbServer)}
+    $ServerDBS = $script:spDatabases | Where-Object {($_.server.name -eq $dbServer) -or ($_.server -eq  $dbServer)}
     $dbs = $ServerDBS.name -join ","
     $dbs = $dbs.replace(",", "','")
     $dbs = "'" + $dbs +"'"
@@ -11271,18 +11988,18 @@ function Get-DBInfosFinding ($DBServer)
         $DBInfo = new-object PSObject
         $DBInfo | add-member -memberType NoteProperty -name "DB_ID" -Value $DBInfoSQL.Database_ID
         $DBInfo | add-member -memberType NoteProperty -name "Database Name" -Value $($DBInfoSQL.Name)
-        $DBInfo | add-member -memberType NoteProperty -name "Compatiblity Level" -Value $DBInfoSQL.Compatibility_Level
+        $DBInfo | add-member -memberType NoteProperty -name "Compatibility Level" -Value $DBInfoSQL.Compatibility_Level
         $DBInfo | add-member -memberType NoteProperty -name "Collation" -Value $DBInfoSQL.Collation_name
         $DBInfo | add-member -memberType NoteProperty -name "Access" -Value $DBInfoSQL.user_access_desc
         $DBInfo | add-member -memberType NoteProperty -name "State" -Value $DBInfoSQL.state_desc
-        $DBInfo | add-member -memberType NoteProperty -name "Snapshot Isolaton" -Value $DBInfoSQL.snapshot_isolation_state_desc
+        $DBInfo | add-member -memberType NoteProperty -name "Snapshot Isolation" -Value $DBInfoSQL.snapshot_isolation_state_desc
         $DBInfo | add-member -memberType NoteProperty -name "Recovery Model" -Value $DBInfoSQL.recovery_model_desc 
         $DBInfo | add-member -memberType NoteProperty -name "Auto Create Stats" -Value $DBInfoSQL.is_auto_create_stats_on
         $DBInfo | add-member -memberType NoteProperty -name "Auto Update Stats" -Value $DBInfoSQL.is_auto_update_stats_on
         $DBInfo | add-member -memberType NoteProperty -name "Create Date" -Value $DBInfoSQL.create_date
         $DBInfo | add-member -memberType NoteProperty -name "Read Only" -Value $DBInfoSQL.is_read_only
         $DBInfo | add-member -memberType NoteProperty -name "Encrypted" -Value $DBInfoSQL.is_encrypted
-        $DBInfo | add-member -memberType NoteProperty -name "Delayed Durabilty" -Value $DBInfoSQL.delayed_durability_desc
+        $DBInfo | add-member -memberType NoteProperty -name "Delayed Durability" -Value $DBInfoSQL.delayed_durability_desc
         #$DBInfo | add-member -memberType NoteProperty -name "" -Value
 
         $DBInfos += $DBInfo
@@ -11305,7 +12022,7 @@ function Get-DBInfosFinding ($DBServer)
     $IncorrectStateDBs=@()
     $IncorrectReadOnlyDBs=@()
     $IncorrectEncryptedDBs=@()
-    $IncorrectDelayedDurabiltyDBs=@()
+    $IncorrectDelayedDurabilityDBs=@()
     $IncorrectAutoCreateStatsDBs=@()
     $IncorrectAutoUpdateStatsDBs=@()
     $IncorrectRecoveryModelDBs=@()
@@ -11315,7 +12032,7 @@ function Get-DBInfosFinding ($DBServer)
     foreach ($dbinfo in $DBInfos)
     {
 
-        if ($DBInfo.'Compatiblity Level' -ne $TargetCompatLevel) 
+        if ($DBInfo.'Compatibility Level' -ne $TargetCompatLevel) 
         {
             $IncorrectCompatLevelDBs += $DBInfo.'Database Name'
         }
@@ -11345,7 +12062,7 @@ function Get-DBInfosFinding ($DBServer)
             $IncorrectReadOnlyDBs += $DBInfo.'Database Name'
         }
 
-        if ($DBInfo.'Snapshot Isolaton' -ne "OFF") 
+        if ($DBInfo.'Snapshot Isolation' -ne "OFF") 
         {
             $IncorrectSnapShotIsolationDBs += $DBInfo.'Database Name'
         }
@@ -11355,9 +12072,9 @@ function Get-DBInfosFinding ($DBServer)
             $IncorrectEncryptedDBs += $DBInfo.'Database Name'
         }
 
-        if ($DBInfo.'Delayed Durabilty' -ne "DISABLED") 
+        if ($DBInfo.'Delayed Durability' -ne "DISABLED") 
         {
-            $IncorrectDelayedDurabiltyDBs += $DBInfo.'Database Name'
+            $IncorrectDelayDurabilityDBs += $DBInfo.'Database Name'
         }
 
         if ($DBInfo.'Auto Create Stats' -ne $false) 
@@ -11379,7 +12096,6 @@ function Get-DBInfosFinding ($DBServer)
     {
         $DBInfosFinding.Severity =[SPDiagnostics.Severity]::Warning 
         $DBInfosFinding.WarningMessage += "Databases set to ReadOnly: " + $($IncorrectReadOnlyDBs -join (', '))
-        $DBInfosFinding.WarningMessage += "<BR>"
     }
 
     # State
@@ -11387,7 +12103,6 @@ function Get-DBInfosFinding ($DBServer)
     {
         $DBInfosFinding.Severity =[SPDiagnostics.Severity]::Warning 
         $DBInfosFinding.WarningMessage += "Databases with incorrect Incorrect State: " + $($IncorrectStateDBs -join (', '))
-        $DBInfosFinding.WarningMessage += "<BR>"
     }
     
     # Compat Level
@@ -11395,7 +12110,6 @@ function Get-DBInfosFinding ($DBServer)
     {
         $DBInfosFinding.Severity =[SPDiagnostics.Severity]::Warning 
         $DBInfosFinding.WarningMessage += "Databases with incorrect Database_Compatibility Level: " + $($IncorrectCompatLevelDBs -join (', '))
-        $DBInfosFinding.WarningMessage += "<BR>"
     }
 
     # Collation
@@ -11403,7 +12117,6 @@ function Get-DBInfosFinding ($DBServer)
     {
         $DBInfosFinding.Severity =[SPDiagnostics.Severity]::Warning 
         $DBInfosFinding.WarningMessage += "Databases with incorrect Collation: " + $($IncorrectCollationDBs -join (', '))
-        $DBInfosFinding.WarningMessage += "<BR>"
     }
 
     # Encrypted
@@ -11411,15 +12124,13 @@ function Get-DBInfosFinding ($DBServer)
     {
         $DBInfosFinding.Severity =[SPDiagnostics.Severity]::Warning 
         $DBInfosFinding.WarningMessage += "Encrypted Databases: " + $($IncorrectEncryptedDBs  -join (', '))
-        $DBInfosFinding.WarningMessage += "<BR>"
     }
 
-    # Delayed Durabilty
-    if ($IncorrectDelayedDurabiltyDBs.Count -gt 0)
+    # Delayed Durability
+    if ($IncorrectDelayedDurabilityDBs.Count -gt 0)
     {
         $DBInfosFinding.Severity =[SPDiagnostics.Severity]::Warning 
-        $DBInfosFinding.WarningMessage += "Databases with incorrect 'Delayed Durability' configuration: " + $($IncorrectDelayedDurabiltyDBs -join (', '))
-        $DBInfosFinding.WarningMessage += "<BR>"
+        $DBInfosFinding.WarningMessage += "Databases with incorrect 'Delayed Durability' configuration: " + $($IncorrectDelayedDurabilityDBs -join (', '))
     }
 
     # Access
@@ -11427,7 +12138,6 @@ function Get-DBInfosFinding ($DBServer)
     {
         $DBInfosFinding.Severity =[SPDiagnostics.Severity]::Warning 
         $DBInfosFinding.WarningMessage += "Databases with incorrect Access Settings: " + $($IncorrectAccessDBs -join (', '))
-        $DBInfosFinding.WarningMessage += "<BR>"
     }
 
     # Snapshot Isolation
@@ -11435,7 +12145,6 @@ function Get-DBInfosFinding ($DBServer)
     {
         $DBInfosFinding.Severity =[SPDiagnostics.Severity]::Warning 
         $DBInfosFinding.WarningMessage += "Databases with incorrect 'Snapshot Isolation' Settings: " + $($IncorrectSnapShotIsolationDBs -join (', '))
-        $DBInfosFinding.WarningMessage += "<BR>"
     }
 
 <# False Positives for some default DBs, therefore create no warning.
@@ -11519,10 +12228,10 @@ Function Get-SPDiagnosticSQLFindings()
 {
     $SQLServersFinding = New-DiagnosticFinding -Name "SQL Servers" -InputObject $null -Format List
 
-    $dbServers = ( Get-SPDatabase  | ForEach-Object {$_.parent.server.Address})  | Sort-Object | Get-Unique
+    $dbServers = ($script:spDatabases  | ForEach-Object {$_.parent.server.Address})  | Sort-Object | Get-Unique
     foreach ($dbServer in $DBServers)
     {
-        $SPDBs = (get-SPDatabase  | Where-Object {$_.parent.server.name -eq $dbserver})
+        $SPDBs = ($script:spDatabases | Where-Object {$_.parent.server.name -eq $dbserver})
         if ($SPDBs)
         {
             $SQLServerData = New-Object PSObject
@@ -11596,7 +12305,7 @@ Function Get-SPDiagnosticSQLFindings()
                     $ClusterMember | add-member -memberType NoteProperty -name "Member name" -value $($Row[0])
                     $ClusterMember | add-member -memberType NoteProperty -name "Member type description" -value $Row[2]
                     $ClusterMember | add-member -memberType NoteProperty -name "Member State" -value $Row[4]
-                    $ClusterMember | add-member -memberType NoteProperty -name "Member Number of Quroum votes" -value $Row[5]
+                    $ClusterMember | add-member -memberType NoteProperty -name "Member Number of Quorum votes" -value $Row[5]
                     $ClusterMembers += $ClusterMember
                 }
 
@@ -11774,7 +12483,7 @@ Function Get-SPDiagnosticSQLFindings()
                         $AAGDB | add-member -memberType NoteProperty -name "Synchronization Status" -value $row[4]
                         $AAGDB | add-member -memberType NoteProperty -name "Synchronization Health" -value $row[5]
                         $AAGDB | add-member -memberType NoteProperty -name "Database State" -value $row[6]
-                        $AAGDB | add-member -memberType NoteProperty -name "Is Suspende" -value $row[7]
+                        $AAGDB | add-member -memberType NoteProperty -name "Is Suspended" -value $row[7]
                         $AAGDB | add-member -memberType NoteProperty -name "Suspended reason" -value $row[8]
                         $AAGDB | add-member -memberType NoteProperty -name "Last Hardened" -value $row[9]
                         $AAGDB | add-member -memberType NoteProperty -name "Last Committed" -value $row[10]
@@ -11839,12 +12548,6 @@ Function Get-SPDiagnosticSQLFindings()
 #endregion AAG
         }
 
-    }
-
-    $sqlAliasFinding = Get-SPDiagnosticsSqlAlias
-    if($sqlAliasFinding.InputObject.Count -ge 1)
-    {
-        $SQLServersFinding.ChildFindings.Add($sqlAliasFinding)
     }
 
     return $SQLServersFinding
@@ -12152,6 +12855,7 @@ function main
     $script:SPFarm = $farm
     $Script:SPFarmBuild = $script:SPFarm.BuildVersion
     $script:servers = Get-SPServer | Sort-Object Name
+    $script:spDatabases = Get-SPDatabase | Sort-Object Name
 
     if($Help)
     {
@@ -12209,12 +12913,20 @@ function main
     {
         Select-SPDiagnosticSSA
     }
-
     
-
+    if($UsageAndReporting -and $site)
+    {
+        $rootFindingCollection.Add((Get-SPDiagnosticUsageAndReportingInformation $site))
+    }
 
     $rootFindingCollection = New-Object SPDiagnostics.FindingCollection[SPDiagnostics.Finding]
-    $rootFindingCollection.Add((Get-SPDiagnosticSupportDateFinding))
+    $supportDateFinding = Get-SPDiagnosticSupportDateFinding
+    if ($null -ne $supportDateFinding -and (
+            [int]$supportDateFinding.Severity -ge [int][SPDiagnostics.Severity]::Warning -or
+            $supportDateFinding.ChildFindings.Count -gt 0))
+    {
+        $rootFindingCollection.Add($supportDateFinding)
+    }
     $rootFindingCollection.Add((Get-SPDiagnosticFarmFindings))
     $rootFindingCollection.Add((Get-SPDiagnosticAuthFindings))
     $rootFindingCollection.Add((Get-SPDiagnosticSearchFindings))
@@ -12227,11 +12939,6 @@ function main
     if($DistributedCache -or $Performance)
     {
         $rootFindingCollection.Add((Get-SPDiagnosticsDCacheFinding))
-    }
-
-    if($UsageAndReporting -and $site)
-    {
-        $rootFindingCollection.Add((Get-SPDiagnosticUsageAndReportingInformation $site))
     }
 
     if($TLS)
