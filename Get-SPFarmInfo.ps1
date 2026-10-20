@@ -140,7 +140,7 @@ if([System.IntPtr]::Size -lt 8)
     exit
 }
 
-$ScriptVersion="4.1.2608.1600"
+$ScriptVersion="4.2.2610.2000"
 $script:PreviousFindingTime= Get-Date
 
 # Retrieve parameters information
