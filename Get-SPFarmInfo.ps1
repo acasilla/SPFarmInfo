@@ -14,7 +14,52 @@
 .INPUTS
     None at this time
 .OUTPUTS
-    An html report documenting findings.
+    A self-contained HTML report documenting findings, with embedded JSON in the
+    script element spfarminfo-data (type application/json). Copy JSON and Download
+    JSON export that same data without requiring a server or companion file.
+    Copy JSON uses the asynchronous browser clipboard API; when clipboard access
+    is unavailable or denied, use Download JSON. Export controls do not parse the
+    embedded JSON again or insert it into a hidden text box.
+    Schema 1.6 contains report metadata, summary counts, and a flat findings array
+    with stable traversal IDs, parent IDs, plain-text descriptions, and records.
+    Get-SPFarm captures selected public scalar settings once as property-name/value
+    pairs under its properties object, from the farm
+    already used for collection. Connection strings, account/contact details,
+    Properties, UpgradedPersistedProperties, and object graphs are excluded.
+    Its exportNotes records selected members unavailable on the installed version.
+    SPColumnDefinition, SPJobHistory, and AnalysisTaskInfo objects are exported as
+    { objectType, properties } using public scalar members and scalar collections.
+    Member names/types are discovered at runtime for version compatibility.
+    Complex members on these targeted types are not read and are listed in
+    exportNotes. This avoids traversing farm/service back-references.
+    Command-labeled sections also expose collected web applications, service
+    applications/proxies/groups, selected timer jobs, diagnostic settings,
+    and STS settings without rerunning commands.
+    Records retain scope, runtime type, source finding IDs, and export notes.
+    All command-labeled sections are consecutive after summary and findings.
+    Additional sections cover servers, databases, search applications/content
+    sources/topologies/components, usage service/definitions, distributed cache
+    client settings, trust issuers/authorities, certificates/settings, and WOPI.
+    Cache client settings are scoped by farm/container type, matching the query;
+    Host is only an optional observation from the existing display collector.
+    Failed Distributed Cache statistics queries are reported as warnings without
+    preventing collection of remaining caches. Partial memory sums are labeled;
+    a complete memory total is unavailable when any cache statistics are missing.
+    Optional collectors retain their existing version, permission, and option gates.
+    Certificate exports contain public metadata only, never key material.
+    Collection status and coverage distinguish unavailable/uncollected data from
+    a complete inventory. Service application inventory reuses farm enumeration;
+    timer job coverage is limited to jobs inspected by existing collectors.
+    Minute/hourly/daily/weekly/monthly schedules export public scalar members.
+    exportNotes identifies nested objects represented as text or depth-limited,
+    and unreadable properties exported as null with a warning.
+    The JSON is a snapshot of collected findings, not a complete farm object dump;
+    existing presentation-grouped values remain grouped. Record strings preserve
+    literal content, with styling sentinels removed and line-break sentinels
+    converted to newlines. Server-name masking is
+    applied to the JSON when UseEncodedServerId is enabled. Treat the embedded
+    data as having the same sensitivity as the visible report.
+    The -Text output remains unchanged and does not include JSON.
 .NOTES
     General notes
     Version 4.x
@@ -164,6 +209,7 @@ namespace SPDiagnostics
         public List<string> WarningMessage;
         public List<Uri> ReferenceLink;
         public object InputObject;
+        public List<object> CommandSnapshots = new List<object>();
         public bool Expand;
         public Format Format;
         public FindingCollection<Finding> ChildFindings;
@@ -181,7 +227,15 @@ namespace SPDiagnostics
     }
 }
 "@
-Add-Type -TypeDefinition $cs -Language CSharp
+$loadedFindingType = 'SPDiagnostics.Finding' -as [type]
+if($null -eq $loadedFindingType)
+{
+    Add-Type -TypeDefinition $cs -Language CSharp
+}
+elseif($null -eq $loadedFindingType.GetField('CommandSnapshots'))
+{
+    throw 'An older SPFarmInfo diagnostic framework is already loaded. Open a fresh SharePoint PowerShell session and rerun this updated script.'
+}
 
 
 #cmdlet used to create new SPDiagnostics.Finding objects for eas of consumption
@@ -390,7 +444,7 @@ function Write-DiagnosticFindingFragment
             'HTML'
             {
                 $encodedFindingName = [uri]::EscapeDataString($Finding.Name)
-                $preContent = "`r`n<details{0}><summary id=`"{1}`" class=`"heading {2}`">{3}</summary><div class=`"finding`">" -f $expandStr, $encodedFindingName, $class, $Finding.Name
+                $preContent = "`r`n<details{0}>`r`n<summary id=`"{1}`" class=`"heading {2}`">{3}</summary>`r`n<div class=`"finding`">" -f $expandStr, $encodedFindingName, $class, $Finding.Name
             }
             'TEXT'
             {
@@ -457,7 +511,7 @@ function Write-DiagnosticFindingFragment
         {
             'HTML'
             {
-                $postContent = "</details>"
+                $postContent = "`r`n</details>`r`n"
             }
             'TEXT'
             {
@@ -487,7 +541,7 @@ function Write-DiagnosticFindingFragment
 
             # Generate a unique guid and add DIV tag for getting element in order to copy to clipboard
             $CopyToClipBoardGuid = [System.Guid]::NewGuid()
-            $preContent  += "<div id=`"{0}`" class=`"copyToClipboardDiv`">" -f $CopyToClipBoardGuid
+            $preContent  += "`r`n<div id=`"{0}`" class=`"copyToClipboardDiv`">" -f $CopyToClipBoardGuid
 
             if($properties.Count -eq 1)
             {
@@ -533,6 +587,10 @@ function Write-DiagnosticFindingFragment
 
         $htmlFragment+=$postContent
 
+        if($OutputFormat -eq [SPDiagnostics.OutputFormat]::HTML)
+        {
+            return ($htmlFragment -join "`r`n")
+        }
         return $htmlFragment
     }
     catch
@@ -540,6 +598,544 @@ function Write-DiagnosticFindingFragment
         Write-Error $_
         return $null
     }
+}
+
+function ConvertTo-DiagnosticDataText
+{
+    param(
+        [AllowEmptyString()][string]$Value,
+        [switch]$Html
+    )
+
+    $valueText = $Value.Replace('~~~BR~~~', "`n")
+    $valueText = $valueText -replace '~~~(?:POLICYSTART|POLICYEND|SETSTART|SETEND|PILLGOOD|PILLBAD|PILLWARN|PILLEND)~~~', ''
+    if($Html)
+    {
+        $valueText = $valueText -replace '(?i)<br\s*/?>', "`n"
+        $valueText = $valueText -replace '<[^>]+>', ''
+        $valueText = [System.Net.WebUtility]::HtmlDecode($valueText)
+    }
+    if($UseEncodedServerId)
+    {
+        foreach($server in $script:servers)
+        {
+            foreach($serverName in @($server.Address, $server.Name))
+            {
+                if(![string]::IsNullOrEmpty($serverName))
+                {
+                    $valueText = [regex]::Replace($valueText, [regex]::Escape($serverName),
+                        [System.Text.RegularExpressions.MatchEvaluator]{ param($match) [string]$server.EncodedServerId },
+                        [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+                }
+            }
+        }
+    }
+    return $valueText
+}
+
+function ConvertTo-DiagnosticDataValue
+{
+    param(
+        [AllowNull()][object]$Value,
+        [System.Collections.Generic.List[string]]$Notes,
+        [string]$Path = 'records',
+        [int]$Depth = 0,
+        [string[]]$PropertyNames
+    )
+
+    if($null -eq $Value) { return $null }
+    if($Value -is [string] -or $Value -is [char])
+    {
+        return ConvertTo-DiagnosticDataText -Value ([string]$Value)
+    }
+    if($Value -is [System.Enum]) { return $Value.ToString() }
+    if($Value -is [bool] -or $Value -is [byte] -or $Value -is [sbyte] -or
+       $Value -is [int16] -or $Value -is [uint16] -or $Value -is [int32] -or
+       $Value -is [uint32] -or $Value -is [int64] -or $Value -is [uint64] -or
+       $Value -is [single] -or $Value -is [double] -or $Value -is [decimal])
+    {
+        return $Value
+    }
+    if($Value -is [datetime] -or $Value -is [datetimeoffset])
+    {
+        return $Value.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
+    }
+    if($Value -is [guid] -or $Value -is [uri] -or $Value -is [version] -or $Value -is [timespan])
+    {
+        return ConvertTo-DiagnosticDataText -Value ($Value.ToString())
+    }
+    if($Value -is [type])
+    {
+        return ConvertTo-DiagnosticDataText -Value $Value.FullName
+    }
+
+    $targetedType = $Value.GetType().FullName -in @(
+        'Microsoft.SharePoint.Administration.SPColumnDefinition',
+        'Microsoft.SharePoint.Administration.SPJobHistory',
+        'Microsoft.Ceres.AnalysisEngine.Shared.Services.AnalysisTaskInfo',
+        'Microsoft.SharePoint.SPMinuteSchedule',
+        'Microsoft.SharePoint.SPHourlySchedule',
+        'Microsoft.SharePoint.SPDailySchedule',
+        'Microsoft.SharePoint.SPWeeklySchedule',
+        'Microsoft.SharePoint.SPMonthlySchedule',
+        'Microsoft.Office.Server.Search.Administration.DailySchedule',
+        'Microsoft.Office.Server.Search.Administration.WeeklySchedule',
+        'Microsoft.Office.Server.Search.Administration.MonthlySchedule'
+    )
+    # Nested live objects are limited to selected diagnostic types, not farm object graphs.
+    if($Depth -ge 6 -or ($Depth -gt 0 -and
+       !$targetedType -and
+       $Value -isnot [System.Collections.IDictionary] -and
+       $Value -isnot [System.Collections.IEnumerable] -and
+       $Value -isnot [System.Management.Automation.PSCustomObject]))
+    {
+        $Notes.Add(("{0}: {1} represented as text (nested object or depth limit)." -f $Path, $Value.GetType().FullName))
+        return ConvertTo-DiagnosticDataText -Value ($Value.ToString()) -Html
+    }
+    if($Value -is [System.Collections.IDictionary])
+    {
+        $result = [ordered]@{}
+        foreach($key in $Value.Keys)
+        {
+            $name = ConvertTo-DiagnosticDataText -Value ([string]$key)
+            if($result.Contains($name)) { throw "Duplicate structured-data key at $Path : $name" }
+            $result[$name] = ConvertTo-DiagnosticDataValue -Value $Value[$key] -Notes $Notes -Path "$Path.$name" -Depth ($Depth + 1)
+        }
+        return $result
+    }
+    if($Value -is [System.Collections.IEnumerable])
+    {
+        $items = New-Object 'System.Collections.Generic.List[object]'
+        foreach($item in $Value)
+        {
+            $items.Add((ConvertTo-DiagnosticDataValue -Value $item -Notes $Notes -Path ("{0}[{1}]" -f $Path, $items.Count) -Depth ($Depth + 1)))
+        }
+        return ,($items.ToArray())
+    }
+
+    $properties = $Value.PSObject.Properties
+    if($targetedType)
+    {
+        $Path = "$Path.properties"
+        $properties = @(Get-DiagnosticDataTargetProperties -Value $Value -Notes $Notes -Path $Path)
+    }
+    elseif($null -ne $PropertyNames)
+    {
+        $properties = @(Get-DiagnosticDataTargetProperties -Value $Value -Notes $Notes -Path $Path -PropertyNames $PropertyNames)
+    }
+    $result = [ordered]@{}
+    foreach($property in $properties)
+    {
+        $name = ConvertTo-DiagnosticDataText -Value $property.Name
+        if($result.Contains($name)) { throw "Duplicate structured-data property at $Path : $name" }
+        try
+        {
+            # PowerShell property access can suppress getter exceptions; invoke the getter explicitly.
+            $propertyValue = $property.get_Value()
+        }
+        catch
+        {
+            $note = ConvertTo-DiagnosticDataText -Value ("Cannot read structured-data property {0}.{1}: {2}" -f $Path, $name, $_.Exception.Message)
+            $Notes.Add($note)
+            Write-Warning $note
+            $result[$name] = $null
+            continue
+        }
+        $result[$name] = ConvertTo-DiagnosticDataValue -Value $propertyValue -Notes $Notes -Path "$Path.$name" -Depth ($Depth + 1)
+    }
+    if($targetedType)
+    {
+        return [ordered]@{ objectType = $Value.GetType().FullName; properties = $result }
+    }
+    return $result
+}
+
+function Test-DiagnosticDataScalarType
+{
+    param([type]$Type)
+
+    $underlyingType = [System.Nullable]::GetUnderlyingType($Type)
+    if($null -ne $underlyingType) { $Type = $underlyingType }
+    return ($Type.IsPrimitive -or $Type.IsEnum -or $Type -in @(
+        [string], [decimal], [datetime], [datetimeoffset], [guid], [uri],
+        [version], [timespan]
+    ) -or [type].IsAssignableFrom($Type))
+}
+
+function Get-DiagnosticDataTargetProperties
+{
+    param(
+        [object]$Value,
+        [System.Collections.Generic.List[string]]$Notes,
+        [string]$Path,
+        [string[]]$PropertyNames
+    )
+
+    if($Value -is [System.Management.Automation.PSCustomObject] -and $null -ne $PropertyNames)
+    {
+        foreach($name in $PropertyNames)
+        {
+            $property = $Value.PSObject.Properties[$name]
+            if($null -ne $property)
+            {
+                $property
+            }
+            else
+            {
+                $Notes.Add(("{0}.{1}: selected property is unavailable on this farm version." -f $Path, $name))
+            }
+        }
+        return
+    }
+
+    $foundNames = @{}
+    $flags = [System.Reflection.BindingFlags]::Public -bor [System.Reflection.BindingFlags]::Instance
+    foreach($member in $Value.GetType().GetMembers($flags))
+    {
+        if($member -isnot [System.Reflection.PropertyInfo] -and $member -isnot [System.Reflection.FieldInfo])
+        {
+            continue
+        }
+        if($null -ne $PropertyNames -and $PropertyNames -notcontains $member.Name)
+        {
+            continue
+        }
+        $foundNames[$member.Name] = $true
+        if($member -is [System.Reflection.PropertyInfo])
+        {
+            if($null -eq $member.GetGetMethod() -or $member.GetIndexParameters().Length -gt 0)
+            {
+                $Notes.Add(("{0}.{1}: indexed or non-public getter omitted from targeted export." -f $Path, $member.Name))
+                continue
+            }
+            $memberType = $member.PropertyType
+        }
+        elseif($member -is [System.Reflection.FieldInfo])
+        {
+            $memberType = $member.FieldType
+        }
+        $supported = Test-DiagnosticDataScalarType -Type $memberType
+        if(!$supported -and $null -ne $PropertyNames -and
+           $memberType.FullName -in @(
+               'Microsoft.SharePoint.SPSchedule',
+               'Microsoft.Office.Server.Search.Administration.Schedule',
+               'Microsoft.Office.Server.Search.Administration.StartAddressCollection'
+           ))
+        {
+            $supported = $true
+        }
+        if(!$supported -and $memberType.IsArray -and $memberType.GetArrayRank() -eq 1)
+        {
+            $supported = Test-DiagnosticDataScalarType -Type $memberType.GetElementType()
+        }
+        elseif(!$supported -and [System.Collections.IEnumerable].IsAssignableFrom($memberType))
+        {
+            foreach($interface in @($memberType) + @($memberType.GetInterfaces()))
+            {
+                if($interface.IsGenericType -and $interface.GetGenericTypeDefinition() -eq [System.Collections.Generic.IEnumerable``1])
+                {
+                    $supported = Test-DiagnosticDataScalarType -Type $interface.GetGenericArguments()[0]
+                    break
+                }
+            }
+        }
+        if($supported)
+        {
+            $Value.PSObject.Properties[$member.Name]
+        }
+        else
+        {
+            $memberName = ConvertTo-DiagnosticDataText -Value $member.Name
+            $Notes.Add(("{0}.{1}: {2} omitted from targeted export (non-scalar member)." -f $Path, $memberName, $memberType.FullName))
+        }
+    }
+    foreach($name in $PropertyNames)
+    {
+        if(!$foundNames.ContainsKey($name))
+        {
+            $adaptedProperty = $Value.PSObject.Properties[$name]
+            if($null -ne $adaptedProperty)
+            {
+                $adaptedProperty
+            }
+            else
+            {
+                $Notes.Add(("{0}.{1}: selected property is unavailable on this farm version." -f $Path, $name))
+            }
+        }
+    }
+}
+
+function Get-DiagnosticFarmSettings
+{
+    param([object]$Farm)
+
+    if($null -eq $Farm)
+    {
+        throw 'Cannot export farm settings: the farm object is not initialized.'
+    }
+    $propertyNames = @(
+        'Id', 'Name', 'DisplayName', 'TypeName', 'BuildVersion', 'Version',
+        'Status', 'EncodedFarmId', 'TraceSessionGuid', 'CanUpgrade', 'NeedsUpgrade',
+        'IsBackwardsCompatible', 'ShouldDeferUpgradeActions', 'DeploymentLocked',
+        'CEIPEnabled', 'DownloadErrorReportingUpdates', 'ErrorReportingAutomaticUpload',
+        'ErrorReportingEnabled', 'DaysBeforePasswordExpirationToSendEmail',
+        'PasswordChangeGuardTime', 'PasswordChangeMaximumTries', 'PersistedFileChunkSize',
+        'EnableConfigureOrgIdNameIdIssuerMappingRule', 'EnablePreParseSecurityCheckForWorkflow',
+        'IsPaired', 'OneDriveUserExperienceVersion', 'SiteCreationUserExperienceVersion',
+        'SPListUserExperienceVersion', 'UseMinWidthForHtmlPicker', 'UserLicensingEnabled',
+        'XsltTransformTimeOut'
+    )
+    $notes = New-Object 'System.Collections.Generic.List[string]'
+    $properties = ConvertTo-DiagnosticDataValue -Value $Farm -Notes $notes -Path 'Get-SPFarm.properties' -PropertyNames $propertyNames
+    return [ordered]@{
+        objectType = $Farm.GetType().FullName
+        properties = $properties
+        selection = 'allowlisted-scalar-settings'
+        explicitlyExcludedMembers = @(
+            'PairConnectionString', 'PasswordChangeEmailAddress', 'DefaultServiceAccount',
+            'Properties', 'UpgradedPersistedProperties'
+        )
+        exportNotes = $notes.ToArray()
+    }
+}
+
+function Add-DiagnosticDataFindings
+{
+    param(
+        [SPDiagnostics.Finding[]]$Findings,
+        [System.Collections.Generic.List[object]]$Items,
+        [AllowNull()][string]$ParentId,
+        [System.Collections.Generic.List[object]]$Snapshots
+    )
+
+    foreach($finding in $Findings)
+    {
+        if($null -eq $finding) { continue }
+        $id = 'finding-{0:D6}' -f ($Items.Count + 1)
+        foreach($snapshot in $finding.CommandSnapshots)
+        {
+            $Snapshots.Add([pscustomobject]@{ findingId = $id; snapshot = $snapshot })
+        }
+        $notes = New-Object 'System.Collections.Generic.List[string]'
+        $records = New-Object 'System.Collections.Generic.List[object]'
+        if($null -ne $finding.InputObject)
+        {
+            foreach($record in $finding.InputObject)
+            {
+                $records.Add((ConvertTo-DiagnosticDataValue -Value $record -Notes $notes -Path ("{0}.records[{1}]" -f $id, $records.Count)))
+            }
+        }
+        $Items.Add([ordered]@{
+            id = $id
+            parentId = $(if([string]::IsNullOrEmpty($ParentId)) { $null } else { $ParentId })
+            name = ConvertTo-DiagnosticDataText -Value $finding.Name -Html
+            severity = $finding.Severity.ToString()
+            descriptions = @($finding.Description | ForEach-Object { ConvertTo-DiagnosticDataText -Value $_ -Html })
+            warnings = @($finding.WarningMessage | ForEach-Object { ConvertTo-DiagnosticDataText -Value $_ -Html })
+            referenceLinks = @($finding.ReferenceLink | ForEach-Object { ConvertTo-DiagnosticDataText -Value $_.AbsoluteUri })
+            format = $finding.Format.ToString()
+            records = $records.ToArray()
+            exportNotes = $notes.ToArray()
+        })
+        if($finding.ChildFindings.Count -gt 0)
+        {
+            Add-DiagnosticDataFindings -Findings $finding.ChildFindings -Items $Items -ParentId $id -Snapshots $Snapshots
+        }
+    }
+}
+
+function Add-DiagnosticCommandSnapshot
+{
+    param(
+        [SPDiagnostics.Finding]$Finding,
+        [string]$CommandName,
+        [object[]]$Records,
+        [System.Collections.IDictionary]$Scope = ([ordered]@{}),
+        [string]$Source,
+        [string]$Coverage,
+        [string[]]$PropertyNames,
+        [string[]]$IdentityProperties = @('Id'),
+        [string[]]$Notes = @()
+    )
+
+    $Finding.CommandSnapshots.Add([pscustomobject]@{
+        commandName = $CommandName
+        records = $Records
+        scope = $Scope
+        source = $Source
+        coverage = $Coverage
+        propertyNames = $PropertyNames
+        identityProperties = $IdentityProperties
+        notes = $Notes
+    })
+}
+
+function Add-DiagnosticTimerJobSnapshot
+{
+    param(
+        [SPDiagnostics.Finding]$Finding,
+        [object[]]$Jobs,
+        [System.Collections.IDictionary]$Scope,
+        [string]$Source,
+        [string]$Coverage
+    )
+
+    Add-DiagnosticCommandSnapshot -Finding $Finding -CommandName 'Get-SPTimerJob' -Records $Jobs -Scope $Scope -Source $Source -Coverage $Coverage -PropertyNames @(
+        'Id', 'Name', 'DisplayName', 'TypeName', 'Status', 'IsDisabled',
+        'LockType', 'LastRunTime', 'Schedule'
+    )
+}
+
+function Get-DiagnosticCommandData
+{
+    param([System.Collections.Generic.List[object]]$Snapshots)
+
+    $sections = [ordered]@{}
+    foreach($name in @(
+        'Get-SPWebApplication', 'Get-SPServiceApplication', 'Get-SPServiceApplicationProxy',
+        'Get-SPServiceApplicationProxyGroup', 'Get-SPTimerJob', 'Get-SPDiagnosticConfig',
+        'Get-SPSecurityTokenServiceConfig',
+        'Get-SPServer', 'Get-SPDatabase', 'Get-SPEnterpriseSearchServiceApplication',
+        'Get-SPEnterpriseSearchCrawlContentSource', 'Get-SPUsageService', 'Get-SPUsageDefinition',
+        'Get-SPDistributedCacheClientSetting', 'Get-SPEnterpriseSearchTopology',
+        'Get-SPEnterpriseSearchComponent', 'Get-SPTrustedIdentityTokenIssuer',
+        'Get-SPTrustedSecurityTokenIssuer', 'Get-SPTrustedRootAuthority',
+        'Get-SPCertificate', 'Get-SPCertificateSettings', 'Get-SPWopiBinding',
+        'Get-SPWopiZone', 'Get-SPWOPISuppressionSetting'
+    ))
+    {
+        $sections[$name] = @{
+            records = New-Object 'System.Collections.Generic.List[object]'
+            coverage = New-Object 'System.Collections.Generic.List[string]'
+            sources = New-Object 'System.Collections.Generic.List[string]'
+            notes = New-Object 'System.Collections.Generic.List[string]'
+            seen = @{}
+            snapshotCount = 0
+        }
+    }
+    foreach($entry in $Snapshots)
+    {
+        $snapshot = $entry.snapshot
+        $name = $snapshot.commandName
+        if(!$sections.Contains($name)) { throw "Unsupported diagnostic command snapshot: $name" }
+        $section = $sections[$name]
+        $section.snapshotCount++
+        foreach($pair in @(@('coverage', $snapshot.coverage), @('sources', $snapshot.source)))
+        {
+            $text = ConvertTo-DiagnosticDataText -Value $pair[1]
+            if(!$section[$pair[0]].Contains($text)) { $section[$pair[0]].Add($text) }
+        }
+        $scopeNotes = New-Object 'System.Collections.Generic.List[string]'
+        $scope = ConvertTo-DiagnosticDataValue -Value $snapshot.scope -Notes $scopeNotes -Path "$name.scope"
+        foreach($note in @($snapshot.notes) + $scopeNotes.ToArray())
+        {
+            $text = ConvertTo-DiagnosticDataText -Value $note
+            if(!$section.notes.Contains($text)) { $section.notes.Add($text) }
+        }
+        foreach($record in $snapshot.records)
+        {
+            if($null -eq $record) { continue }
+            $notes = New-Object 'System.Collections.Generic.List[string]'
+            $path = '{0}.records[{1}].properties' -f $name, $section.records.Count
+            $arguments = @{ Value = $record; Notes = $notes; Path = $path }
+            if($null -ne $snapshot.propertyNames) { $arguments.PropertyNames = $snapshot.propertyNames }
+            $properties = ConvertTo-DiagnosticDataValue @arguments
+            if($properties -isnot [System.Collections.IDictionary])
+            {
+                throw "Diagnostic command snapshot records must be property objects: $name"
+            }
+            $identity = [ordered]@{}
+            $missingIdentity = $false
+            foreach($property in $snapshot.identityProperties)
+            {
+                if(!$properties.Contains($property) -or $null -eq $properties[$property])
+                {
+                    $missingIdentity = $true
+                    $notes.Add(("{0}: identity property {1} is unavailable; record retained without deduplication." -f $path, $property))
+                }
+                else
+                {
+                    $identity[$property] = $properties[$property]
+                }
+            }
+            $key = ConvertTo-Json -InputObject ([ordered]@{ scope = $scope; identity = $identity }) -Depth 16 -Compress -ErrorAction Stop
+            if($missingIdentity) { $key += '|{0}' -f $section.records.Count }
+            if($section.seen.ContainsKey($key))
+            {
+                $target = $section.seen[$key]
+                $targetPath = '{0}.records[{1}].properties' -f $name, $section.records.IndexOf($target)
+                for($index = 0; $index -lt $notes.Count; $index++) { $notes[$index] = $notes[$index].Replace($path, $targetPath) }
+                foreach($property in $properties.Keys) { $target.properties[$property] = $properties[$property] }
+            }
+            else
+            {
+                $target = [ordered]@{
+                    objectType = $record.GetType().FullName
+                    scope = $scope
+                    properties = $properties
+                    sourceFindingIds = New-Object 'System.Collections.Generic.List[string]'
+                    exportNotes = New-Object 'System.Collections.Generic.List[string]'
+                }
+                $section.seen[$key] = $target
+                $section.records.Add($target)
+            }
+            if(!$target.sourceFindingIds.Contains($entry.findingId)) { $target.sourceFindingIds.Add($entry.findingId) }
+            foreach($note in $notes)
+            {
+                if(!$target.exportNotes.Contains($note)) { $target.exportNotes.Add($note) }
+            }
+        }
+    }
+    $result = [ordered]@{}
+    foreach($name in $sections.Keys)
+    {
+        $section = $sections[$name]
+        foreach($record in $section.records)
+        {
+            $record.sourceFindingIds = $record.sourceFindingIds.ToArray()
+            $record.exportNotes = $record.exportNotes.ToArray()
+        }
+        $status = if($section.snapshotCount -eq 0) { 'notCollected' } elseif($section.records.Count -eq 0) { 'noRecordsCaptured' } else { 'captured' }
+        $result[$name] = [ordered]@{
+            collectionStatus = $status
+            coverage = $section.coverage.ToArray()
+            sources = $section.sources.ToArray()
+            records = $section.records.ToArray()
+            exportNotes = $section.notes.ToArray()
+        }
+    }
+    return $result
+}
+
+function Get-DiagnosticReportJson
+{
+    param([SPDiagnostics.Finding[]]$Findings)
+
+    $items = New-Object 'System.Collections.Generic.List[object]'
+    $snapshots = New-Object 'System.Collections.Generic.List[object]'
+    Add-DiagnosticDataFindings -Findings $Findings -Items $items -ParentId $null -Snapshots $snapshots
+    $data = [ordered]@{
+        schemaVersion = '1.6'
+        generatedAtUtc = [datetime]::UtcNow.ToString('o')
+        scriptVersion = $ScriptVersion
+        product = ConvertTo-DiagnosticDataText -Value $build
+        farmBuild = $script:SPFarmBuild.ToString()
+        serverNamesMasked = [bool]$UseEncodedServerId
+        summary = [ordered]@{
+            totalFindings = $items.Count
+            critical = @($items | Where-Object { $_.severity -eq 'Critical' }).Count
+            warning = @($items | Where-Object { $_.severity -eq 'Warning' }).Count
+            informational = @($items | Where-Object { $_.severity -eq 'Informational' }).Count
+        }
+        findings = $items.ToArray()
+    }
+    $data['Get-SPFarm'] = Get-DiagnosticFarmSettings -Farm $script:SPFarm
+    $commandData = Get-DiagnosticCommandData -Snapshots $snapshots
+    foreach($name in $commandData.Keys) { $data[$name] = $commandData[$name] }
+    $json = ConvertTo-Json -InputObject $data -Depth 32 -ErrorAction Stop
+    # JSON escapes keep HTML raw-text parsing and the legacy whole-report replacements out of the payload.
+    return $json.Replace('&', '\u0026').Replace('<', '\u003c').Replace('>', '\u003e').Replace('~', '\u007e')
 }
 
 #Core function to write html report
@@ -553,6 +1149,12 @@ function Write-DiagnosticReport
         [Parameter(Mandatory=$false)]
         [SPDiagnostics.OutputFormat]$OutputFormat=[SPDiagnostics.OutputFormat]::HTML
     )
+
+    $reportJson = $null
+    if($OutputFormat -eq [SPDiagnostics.OutputFormat]::HTML)
+    {
+        $reportJson = Get-DiagnosticReportJson -Findings $Findings
+    }
 
     #Defining CSS to be applied to the report
     $globalCss = @"
@@ -1022,6 +1624,48 @@ function Write-DiagnosticReport
 
 # https://stackoverflow.com/questions/74838274/copy-html-rich-text-using-navigator-clipboard
 $copyToClipboardJs = @"
+function getStructuredReportJson() {
+    var data = document.getElementById('spfarminfo-data');
+    if (!data) {
+        throw new Error('The embedded JSON data could not be found.');
+    }
+    return data.textContent;
+}
+
+function downloadStructuredReportJson() {
+    try {
+        var blob = new Blob([getStructuredReportJson()], { type: 'application/json;charset=utf-8' });
+        var url = URL.createObjectURL(blob);
+        var link = document.createElement('a');
+        link.href = url;
+        link.download = 'SPFarmInfo-data.json';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+    } catch (error) {
+        alert('Could not download structured data: ' + error.message);
+    }
+}
+
+async function copyStructuredReportJson(button) {
+    if (button.disabled) { return; }
+    var originalLabel = button.textContent;
+    try {
+        if (!navigator.clipboard || typeof navigator.clipboard.writeText !== 'function') {
+            throw new Error('Clipboard access is not available in this browser or context.');
+        }
+        button.disabled = true;
+        button.textContent = 'Copying JSON...';
+        await navigator.clipboard.writeText(getStructuredReportJson());
+    } catch (error) {
+        alert('Could not copy structured data: ' + error.message + ' Use Download JSON instead.');
+    } finally {
+        button.disabled = false;
+        button.textContent = originalLabel;
+    }
+}
+
 function copyToClipboardText(str) {
     function listener(e) {
       const newstr = str.getElementsByTagName("table")[0];
@@ -1198,20 +1842,23 @@ $enhanceTablesJs = @"
 
     if($OutputFormat -eq [SPDiagnostics.OutputFormat]::HTML)
     {
-        $html = "<!DOCTYPE html><html><head><meta charset=`"utf-8`"><Title>SPFarmInfo - {0}</Title>" -f $build
+        $html = "<!DOCTYPE html>`r`n<html>`r`n<head>`r`n<meta charset=`"utf-8`">`r`n<Title>SPFarmInfo - {0}</Title>`r`n" -f $build
         $html+=$globalCss
-        $html += ("<script type=`"text/javascript`">{0}</script></head><body><div class=`"container`">" -f $copyToClipboardJs)
-        $html+="<div id=`"topInfo`">"
-        $html+="<h1>SPFarmInfo - {0} [{1}]</h1>" -f $build, [Microsoft.SharePoint.Administration.SPFarm]::Local.BuildVersion.ToString()
-        $html+="<p style=`"font-style: italic;`">Generated at {0} UTC</p>" -f [datetime]::UtcNow.ToString("MM/dd/yyyy hh:mm:ss tt")
-        $html+="<p style=`"font-style: italic;`">ScriptVersion: {0} (Published on 08-16-2026)</p>" -f $ScriptVersion 
-        $html+="<div class=`"summary`">"
-        $html+="<div class=`"summary-card critical`"><div class=`"count`">{0}</div><div class=`"label`">Critical</div></div>" -f $criticalFindings.Count
-        $html+="<div class=`"summary-card warning`"><div class=`"count`">{0}</div><div class=`"label`">Warnings</div></div>" -f $warningFindings.Count
-        $html+="<div class=`"summary-card info`"><div class=`"count`">{0}</div><div class=`"label`">Info</div></div>" -f $informationalFindings.Count
-        $html+="<div class=`"summary-card total`"><div class=`"count`">{0}</div><div class=`"label`">Total Findings</div></div>" -f (Get-TotalFindingCount -Findings $Findings)
-        $html+="</div>"
-        $html+="<a href='#/' id='expAll' class='col'>Expand All</a>"
+        $html += ("`r`n<script type=`"text/javascript`">{0}</script>`r`n</head>`r`n<body>`r`n<div class=`"container`">`r`n" -f $copyToClipboardJs)
+        $html+="<div id=`"topInfo`">`r`n"
+        $html+="<h1>SPFarmInfo - {0} [{1}]</h1>`r`n" -f $build, [Microsoft.SharePoint.Administration.SPFarm]::Local.BuildVersion.ToString()
+        $html+="<p style=`"font-style: italic;`">Generated at {0} UTC</p>`r`n" -f [datetime]::UtcNow.ToString("MM/dd/yyyy hh:mm:ss tt")
+        $html+="<p style=`"font-style: italic;`">ScriptVersion: {0} (Published on 08-16-2026)</p>`r`n" -f $ScriptVersion
+        $html+="<div class=`"summary`">`r`n"
+        $html+="    <div class=`"summary-card critical`">`r`n        <div class=`"count`">{0}</div>`r`n        <div class=`"label`">Critical</div>`r`n    </div>`r`n" -f $criticalFindings.Count
+        $html+="    <div class=`"summary-card warning`">`r`n        <div class=`"count`">{0}</div>`r`n        <div class=`"label`">Warnings</div>`r`n    </div>`r`n" -f $warningFindings.Count
+        $html+="    <div class=`"summary-card info`">`r`n        <div class=`"count`">{0}</div>`r`n        <div class=`"label`">Info</div>`r`n    </div>`r`n" -f $informationalFindings.Count
+        $html+="    <div class=`"summary-card total`">`r`n        <div class=`"count`">{0}</div>`r`n        <div class=`"label`">Total Findings</div>`r`n    </div>`r`n" -f (Get-TotalFindingCount -Findings $Findings)
+        $html+="</div>`r`n"
+        $html+="<a href='#/' id='expAll' class='col'>Expand All</a>`r`n"
+        $html+="<p><button type=`"button`" onclick=`"copyStructuredReportJson(this)`">Copy JSON</button> <button type=`"button`" onclick=`"downloadStructuredReportJson()`">Download JSON</button></p>`r`n"
+        $html+="<p>Machine-readable findings are embedded as JSON in the spfarminfo-data element. The exported data has the same sensitivity as this report.</p>`r`n"
+        $html+=("<script id=`"spfarminfo-data`" type=`"application/json`">`n{0}`n</script>`r`n" -f $reportJson)
         $html+="<div id=`"ieWarning`" />
         <script type=`"text/javascript`">
             var isIe = navigator.userAgent.indexOf(`"Trident`") > -1;
@@ -1220,7 +1867,7 @@ $enhanceTablesJs = @"
                 document.getElementById(`"ieWarning`").innerHTML = `"This report is not optimized for IE for best results open this report in Microsoft Edge.`";
             }
         </script>"
-        $html+="</div>"
+        $html+="`r`n</div>`r`n"
     }
 
 
@@ -1231,8 +1878,8 @@ $enhanceTablesJs = @"
         {
             'HTML'
             {
-                $html+="<div class=`"review-section critical`"><details open=`"true`"><summary class=`"error heading`">Critical Findings</summary>"
-                $html+="<div style=`"padding-left: 30px`">"
+                $html+="<div class=`"review-section critical`">`r`n<details open=`"true`">`r`n<summary class=`"error heading`">Critical Findings</summary>`r`n"
+                $html+="<div style=`"padding-left: 30px`">`r`n"
             }
             'TEXT'
             {
@@ -1261,7 +1908,7 @@ $enhanceTablesJs = @"
         {
             'HTML'
             {
-                $html+="</div></details></div><br>"
+                $html+="`r`n</div>`r`n</details>`r`n</div>`r`n<br>`r`n"
             }
             'TEXT'
             {
@@ -1278,8 +1925,8 @@ $enhanceTablesJs = @"
         {
             'HTML'
             {
-                $html+="<div class=`"review-section warning`"><details><summary class=`"warning heading`">Review Items</summary>"
-                $html+="<div style=`"padding-left: 30px`">"
+                $html+="<div class=`"review-section warning`">`r`n<details>`r`n<summary class=`"warning heading`">Review Items</summary>`r`n"
+                $html+="<div style=`"padding-left: 30px`">`r`n"
             }
             'TEXT'
             {
@@ -1307,7 +1954,7 @@ $enhanceTablesJs = @"
         {
             'HTML'
             {
-                $html+="</div></details></div><br>"
+                $html+="`r`n</div>`r`n</details>`r`n</div>`r`n<br>`r`n"
             }
             'TEXT'
             {
@@ -1324,8 +1971,8 @@ $enhanceTablesJs = @"
         {
            'HTML'
             {
-                $html+="<div class=`"review-section info`"><details><summary class=`"heading`">Informational Items</summary>"
-                $html+="<div style=`"padding-left: 30px`">"
+                $html+="<div class=`"review-section info`">`r`n<details>`r`n<summary class=`"heading`">Informational Items</summary>`r`n"
+                $html+="<div style=`"padding-left: 30px`">`r`n"
             }
             'TEXT'
             {
@@ -1352,7 +1999,7 @@ $enhanceTablesJs = @"
         {
             'HTML'
             {
-                $html+="</div></details></div><br>"
+                $html+="`r`n</div>`r`n</details>`r`n</div>`r`n<br>`r`n"
             }
             'TEXT'
             {
@@ -1382,10 +2029,10 @@ $enhanceTablesJs = @"
     {
         'HTML'
         {
-            $html+=("<script type=`"text/javascript`">{0}</script>" -f $expandAllJS)
-            $html+=("<script type=`"text/javascript`">{0}</script>" -f $colorizeJs)
-            $html+=("<script type=`"text/javascript`">{0}</script>" -f $enhanceTablesJs)
-            $html+="</div></body></html>"
+            $html+=("`r`n<script type=`"text/javascript`">{0}</script>`r`n" -f $expandAllJS)
+            $html+=("<script type=`"text/javascript`">{0}</script>`r`n" -f $colorizeJs)
+            $html+=("<script type=`"text/javascript`">{0}</script>`r`n" -f $enhanceTablesJs)
+            $html+="</div>`r`n</body>`r`n</html>`r`n"
         }
         'TEXT'
         {
@@ -1882,6 +2529,13 @@ Function Get-SPDiagnosticFarmFindings
     {
         $farmFindings.ChildFindings.Add(($timerAndAdminSvcFinding))
     }
+    else
+    {
+        foreach($child in $timerAndAdminSvcFinding.ChildFindings)
+        {
+            foreach($snapshot in $child.CommandSnapshots) { $farmFindings.CommandSnapshots.Add($snapshot) }
+        }
+    }
 
     $farmFindings.ChildFindings.Add((Get-SPDiagnosticHealthAnalyzerFinding))
     # Moving this finding as a child finding to "Timer Information"
@@ -1896,7 +2550,7 @@ Function Get-SPDiagnosticFarmFindings
     #    $farmFindings.ChildFindings.Add((Get-SPDiagnosticsFarmFeaturesFinding))
     #}
 
-    $farmFindings.ChildFindings.Add((Get-SPDiagnosticCertificateFindings))
+    $farmFindings.ChildFindings.Add((Get-SPDiagnosticCertificateFindings -SnapshotFinding $farmFindings))
     $farmFindings.ChildFindings.Add((Get-SPDiagnosticsDeveloperDashboardSettingsFinding))
     
     #Task 529: Move behind extended findings switch
@@ -1914,7 +2568,7 @@ Function Get-SPDiagnosticFarmFindings
     }
     # Moving dcache to top level finding and only to be included by use of dcache switch.
     #$farmFindings.ChildFindings.Add((Get-SPDiagnosticsDCacheFinding))
-    $farmFindings.ChildFindings.Add((Get-OfficeOnlineServerFindings))
+    $farmFindings.ChildFindings.Add((Get-OfficeOnlineServerFindings -SnapshotFinding $farmFindings))
     $farmFindings.ChildFindings.Add((Get-ContentDeploymentFindings))
 
     #Task 471: move to Servers
@@ -1965,6 +2619,10 @@ function Get-SPDiagnosticFarmBuildInfo
         ConfigDbInstance = $($configDb.ServiceInstance.Instance)
     }
     $finding = New-DiagnosticFinding -Name "Farm Info" -Description "Farm build, ULS Location, and config db" -InputObject $retObj -Format List
+    $commandScope = [ordered]@{ farmId = $farm.Id }
+    Add-DiagnosticCommandSnapshot -Finding $finding -CommandName 'Get-SPDiagnosticConfig' -Records $SPDiagnosticConfig -Scope $commandScope -Source 'Get-SPDiagnosticConfig' -Coverage 'Selected logging configuration already read by the farm collector.' -IdentityProperties @() -PropertyNames @(
+        'LogLocation', 'DaysToKeepLogs', 'LogMaxDiskSpaceUsageEnabled', 'LogDiskSpaceUsageGB'
+    )
 
     if($countOfVerboseEx -gt 0 -or $countOfVerboseEx -gt 0 -or $countOfVerboseEvents)
     {
@@ -2385,6 +3043,9 @@ function Get-SPDiagnosticServersInFarm
     }
     
     $finding = New-DiagnosticFinding -Name "Servers in Farm" -Severity Default -InputObject $serverColl -Format Table
+    Add-DiagnosticCommandSnapshot -Finding $finding -CommandName 'Get-SPServer' -Records $servers -Scope ([ordered]@{ farmId = $script:SPFarm.Id }) -Source 'Cached Get-SPServer inventory' -Coverage 'Servers returned during initialization; selected identity, role, and status properties.' -PropertyNames @(
+        'Id', 'Name', 'DisplayName', 'Address', 'Role', 'Status'
+    )
 
     #Servers in Custom Role
     $CustomRoleServers =@()
@@ -3191,6 +3852,10 @@ function Get-SPDatabasesInFarm
         }
     }
 	$spDatabasesInFarmFinding.inputObject = $spDatabasesInFarm
+    Add-DiagnosticCommandSnapshot -Finding $spDatabasesInFarmFinding -CommandName 'Get-SPDatabase' -Records $script:spDatabases -Scope ([ordered]@{ farmId = $script:SPFarm.Id }) -Source 'Cached Get-SPDatabase inventory' -Coverage 'Registered databases; selected identity, SQL source, build, and upgrade flags. Credentials and connection strings excluded.' -PropertyNames @(
+        'Id', 'Name', 'TypeName', 'NormalizedDataSource', 'Status', 'BuildVersion',
+        'IsReadOnly', 'Encrypt', 'IsSqlAzure', 'Exists', 'NeedsUpgrade'
+    )
 	return $spDatabasesInFarmFinding
 }
 
@@ -3398,6 +4063,9 @@ function Get-SPDiagnosticServiceAppInfo
             [void]$remainingProxies.Add($appProxy)
         }
     }
+    $allProxies = $remainingProxies.ToArray()
+    $observedProxyApplications = @{}
+    $connectionNotes = New-Object 'System.Collections.Generic.List[string]'
 
     # Non-breaking spaces survive HTML rendering, so they indent connected proxy rows.
     $indent = ([char]0x00A0).ToString() * 10
@@ -3422,7 +4090,13 @@ function Get-SPDiagnosticServiceAppInfo
         foreach($appProxy in @($remainingProxies))
         {
             $isConnected = $false
-            try { $isConnected = $application.IsConnected($appProxy) } catch {}
+            try { $isConnected = $application.IsConnected($appProxy) }
+            catch
+            {
+                $note = "Could not check service application $($application.Id) against proxy $($appProxy.Id): $($_.Exception.Message)"
+                $connectionNotes.Add($note)
+                Write-Warning $note
+            }
             if($isConnected) { $connected += $appProxy }
         }
 
@@ -3430,6 +4104,7 @@ function Get-SPDiagnosticServiceAppInfo
         # so they aren't matched again or listed as un-connected.
         foreach($appProxy in $connected)
         {
+            $observedProxyApplications[[string]$appProxy.Id] = $application.Id
             $serviceAppRows += [PSCustomObject]@{
                 Name    = "$indent$($appProxy.DisplayName)"
                 Type    = $appProxy.TypeName
@@ -3456,6 +4131,21 @@ function Get-SPDiagnosticServiceAppInfo
     $serviceAppRows = @($serviceAppRows | Sort-Object SortKey | Select-Object Name, Type, Status)
 
     $serviceAppFinding = New-DiagnosticFinding -Name "Service Applications" -InputObject $serviceAppRows -Format Table
+    $commandScope = [ordered]@{ farmId = $farm.Id }
+    Add-DiagnosticCommandSnapshot -Finding $serviceAppFinding -CommandName 'Get-SPServiceApplication' -Records $serviceApplications -Scope $commandScope -Source 'SPFarm.Services.Applications (existing command-equivalent farm enumeration)' -Coverage 'Service application inventory; selected identity and status properties, not all subtype settings.' -PropertyNames @(
+        'Id', 'Name', 'DisplayName', 'TypeName', 'Status'
+    )
+    $proxyCommandRecords = @($allProxies | ForEach-Object {
+        [pscustomobject]@{
+            Id = $_.Id
+            Name = $_.Name
+            DisplayName = $_.DisplayName
+            TypeName = $_.TypeName
+            Status = $_.Status
+            ObservedServiceApplicationId = $observedProxyApplications[[string]$_.Id]
+        }
+    })
+    Add-DiagnosticCommandSnapshot -Finding $serviceAppFinding -CommandName 'Get-SPServiceApplicationProxy' -Records $proxyCommandRecords -Scope $commandScope -Source 'SPFarm.ServiceProxies.ApplicationProxies (existing command-equivalent farm enumeration)' -Coverage 'Proxy inventory. ObservedServiceApplicationId reflects existing first-match connection checks; null does not prove there is no connection.' -Notes $connectionNotes.ToArray()
     $serviceAppFinding.Description += "- This finding should be similar to 'Central Admin > Applications > Manage Service Applications' page. </br>- Most service applications should have a 'connected' proxy right under it. </br>- If for example, Search Service Application, does not have a proxy right below, but you do see a 'Search Proxy' on the page, then this would indicate that proxy is rogue and search functionality is not working properly. </br>- In this type of scenario, you want to delete the Proxy, then recreate it so it reassociates with the Service App."
 
     $notOnline = $serviceAppRows | Where-Object{$null -ne $_.Status -and $_.Status -ne [Microsoft.SharePoint.Administration.SPObjectStatus]::Online}
@@ -3472,18 +4162,28 @@ function Get-SPDiagnosticServiceAppInfo
     ## As a child finding dump out the service application associations
     $proxyGroups = Get-SPServiceApplicationProxyGroup
     $proxyGroupObjects = @()
+    $proxyGroupCommandRecords = @()
     foreach($proxyGroup in $proxyGroups)
     {
+        $proxyIds = New-Object 'System.Collections.Generic.List[object]'
         foreach($proxy in $proxyGroup.Proxies)
         {
+            $proxyIds.Add($proxy.Id)
             $proxyGroupObjects += [PSCustomObject]@{
                 ProxyGroup = $proxyGroup.FriendlyName
                 Proxy = $proxy.DisplayName
             }
         }
+        $proxyGroupCommandRecords += [pscustomobject]@{
+            Id = $proxyGroup.Id
+            Name = $proxyGroup.Name
+            FriendlyName = $proxyGroup.FriendlyName
+            ProxyIds = $proxyIds.ToArray()
+        }
     }
     $proxyGroupObjects = $proxyGroupObjects | Sort-Object ProxyGroup, Proxy
     $proxyGroupFinding = New-DiagnosticFinding -Name "Proxy Group Associations" -InputObject $proxyGroupObjects -Format Table
+    Add-DiagnosticCommandSnapshot -Finding $proxyGroupFinding -CommandName 'Get-SPServiceApplicationProxyGroup' -Records $proxyGroupCommandRecords -Scope $commandScope -Source 'Get-SPServiceApplicationProxyGroup' -Coverage 'Proxy groups returned by the existing collector, including empty groups and proxy ID membership.'
 
     $serviceAppFinding.ChildFindings.Add($proxyGroupFinding)
 
@@ -3527,6 +4227,7 @@ function Get-SPDiagnosticsTrustedRootAuthority
         $TrustedRootAuthoritiesReport+=$tra
     }
     $TrustedRootAuthFindings.InputObject = $TrustedRootAuthoritiesReport
+    Add-DiagnosticCommandSnapshot -Finding $TrustedRootAuthFindings -CommandName 'Get-SPTrustedRootAuthority' -Records $TrustedRootAuthoritiesReport -Scope ([ordered]@{ farmId = $script:SPFarm.Id }) -Source 'Get-SPTrustedRootAuthority curated public certificate report' -Coverage 'Root authorities and public certificate identity, validity, and thumbprint; no private key material.'
     return $TrustedRootAuthFindings
 }
 
@@ -3848,6 +4549,7 @@ function Get-SPDiagnosticTimerJobHistoryFinding
     #>
 
     $finding = New-DiagnosticFinding -Name "TimerJobHistory" -InputObject $null -Format List
+    Add-DiagnosticTimerJobSnapshot -Finding $finding -Jobs $job -Scope ([ordered]@{ farmId = $script:SPFarm.Id }) -Source 'Get-SPTimerJob job-delete-job-history' -Coverage 'The delete-job-history timer job inspected by the existing collector; not all farm timer jobs.'
     $uri = New-Object System.Uri('https://blog.stefan-gossner.com/2018/04/12/changes-in-the-timerjobhistory-table-maintenance-introduced-in-april-2018-cu-for-sharepoint-2013/')
     $finding.ReferenceLink += $uri
 
@@ -4081,6 +4783,12 @@ function Get-SPDiagnosticsWebAppsFinding
         }
 
         $webAppFinding = New-DiagnosticFinding -Name $webAppName -InputObject $DisplayAAMs -Format Table
+        Add-DiagnosticCommandSnapshot -Finding $webAppFinding -CommandName 'Get-SPWebApplication' -Records $webApp -Scope ([ordered]@{ farmId = $script:SPFarm.Id }) -Source 'Get-SPWebApplication -IncludeCentralAdministration' -Coverage 'Web applications returned by the existing collector, including Central Administration. Selected identity and configuration properties; source findings contain zone and threshold details.' -PropertyNames @(
+            'Id', 'Name', 'DisplayName', 'Url', 'IsAdministrationWebApplication',
+            'ExternalUrlZone', 'UseExternalUrlZoneForAlerts', 'RecycleBinEnabled',
+            'RecycleBinCleanupEnabled', 'RecycleBinRetentionPeriod', 'SecondStageRecycleBinQuota',
+            'SharePoint2010WorkflowsEnabled', 'DisableCoauthoring', 'AllowDesigner', 'RequiredDesignerVersion'
+        )
         $webAppFinding.Description += " Site Count: (" +$webAppSiteCount +")"
 
 
@@ -5772,7 +6480,7 @@ function Get-SPDiagnosticAuthFindings
     $authFindings.ChildFindings.Add((Get-SPDiagnosticsSPSecurityTokenServiceConfigFinding))
     $authFindings.ChildFindings.Add((Get-SPDiagnosticsTrustedRootAuthority))
     $authFindings.ChildFindings.Add((Get-SPDiagnosticsSPTrustedIdentityTokenIssuerFinding))
-    $authFindings.ChildFindings.Add((Get-SPDiagnosticsSPTrustedSecurityTokenIssuerFinding))
+    $authFindings.ChildFindings.Add((Get-SPDiagnosticsSPTrustedSecurityTokenIssuerFinding -SnapshotFinding $authFindings))
     $authFindings.ChildFindings.Add((Get-SPDiagnosticsSPClaimProviderFinding))
     $authFindings.ChildFindings.Add((Get-SPDiagnosticKerberosFindings)) 
     $authFindings.ChildFindings.Add((Get-SPDiagnosticsTokenTimeoutFinding)) 
@@ -5837,6 +6545,7 @@ function Get-SPDiagnosticsSPSecurityTokenServiceConfigFinding
     WindowsModeIgnoreCache
     
     $finding = New-DiagnosticFinding -Name "Security Token Service Config" -ReferenceLink "https://joshroark.com/sharepoint-users-forced-to-re-authenticate-unexpectedly/" -InputObject $stsFindingObj -Format List
+    Add-DiagnosticCommandSnapshot -Finding $finding -CommandName 'Get-SPSecurityTokenServiceConfig' -Records $stsFindingObj -Scope ([ordered]@{ farmId = $script:SPFarm.Id }) -Source 'Get-SPSecurityTokenServiceConfig' -Coverage 'The existing curated STS lifetime, cache, cookie, and authentication settings; no signing keys or credentials.' -IdentityProperties @()
 
     #Check the size of the MaxLogonTokenCacheItems if trusted issuers are present
     $maxLogonTokenCacheItemsThreshold = 2000
@@ -5927,6 +6636,13 @@ function Get-SPDiagnosticsSPTrustedIdentityTokenIssuerFinding
     $TrustedIssuerFindings = New-DiagnosticFinding -Name "Trusted Identity Providers" -InputObject $null -Format Table
     #$TrustedIssuerFindings = New-DiagnosticFindingCollection
     $trustedIdentityTokenIssuers = Get-SPTrustedIdentityTokenIssuer
+    Add-DiagnosticCommandSnapshot -Finding $TrustedIssuerFindings -CommandName 'Get-SPTrustedIdentityTokenIssuer' -Records $trustedIdentityTokenIssuers -Scope ([ordered]@{ farmId = $script:SPFarm.Id }) -Source 'Get-SPTrustedIdentityTokenIssuer' -Coverage 'Selected issuer identity, authentication behavior, and public endpoints; certificates and property bags excluded.' -PropertyNames @(
+        'Id', 'Name', 'DisplayName', 'Status', 'Description', 'ProviderUri',
+        'ProviderSignOutUri', 'DefaultProviderRealm', 'ClaimProviderName',
+        'UseStateToRedirect', 'UseWReplyParameter', 'UseWHomeRealmParameter',
+        'RegisteredIssuerName', 'DefaultClientIdentifier', 'AuthorizationEndPointUri',
+        'TrustedLoginMethod', 'MetadataEndpoint', 'IsAutomaticallyUpdated'
+    )
     foreach($tokenIssuer in $trustedIdentityTokenIssuers)
     {
         $tiProps = $tokenIssuer | Select-Object -Property `
@@ -6034,12 +6750,22 @@ function Get-SPDiagnosticOIDCKidCertificateMapFinding
 function Get-SPDiagnosticsSPTrustedSecurityTokenIssuerFinding
 {
     [cmdletbinding()]
-    Param()
+    Param([SPDiagnostics.Finding]$SnapshotFinding)
 
     $trustedSecurityTokenIssuers = Get-SPTrustedSecurityTokenIssuer
+    $issuerSnapshotFinding = if($null -ne $SnapshotFinding) { $SnapshotFinding } else { New-DiagnosticFinding -Name 'Trusted Security Token Issuers' -InputObject $null -Format Table }
+    Add-DiagnosticCommandSnapshot -Finding $issuerSnapshotFinding -CommandName 'Get-SPTrustedSecurityTokenIssuer' -Records $trustedSecurityTokenIssuers -Scope ([ordered]@{ farmId = $script:SPFarm.Id }) -Source 'Get-SPTrustedSecurityTokenIssuer' -Coverage 'Selected identity and public endpoint settings; signing certificates, credentials, and object graphs excluded.' -PropertyNames @(
+        'Id', 'Name', 'TypeName', 'DisplayName', 'Status', 'IsSelfIssuer', 'NameId',
+        'RegisteredIssuerName', 'AuthorizationEndPointUri', 'TokenEndPointUri',
+        'DefaultClientIdentifier', 'Description', 'MetadataEndPoint', 'IsAutomaticallyUpdated'
+    )
     if($trustedSecurityTokenIssuers.Count -ge 1)
     {
         $Findings = New-DiagnosticFinding -Name "Trusted Security Token Issuers" -InputObject $null -Format Table
+        if($null -eq $SnapshotFinding)
+        {
+            foreach($snapshot in $issuerSnapshotFinding.CommandSnapshots) { $Findings.CommandSnapshots.Add($snapshot) }
+        }
         foreach($tokenIssuer in $trustedSecurityTokenIssuers)
         {
             $tokenIssuerReport = New-Object PSObject @{
@@ -6514,14 +7240,17 @@ Function Get-SPDiagnosticKerberosFindings
 #region SearchTopologyBoundaries
 Function Get-SPDiagnosticsSearchTopologyLimits
 {
+    param([SPDiagnostics.Finding]$SnapshotFinding)
 
     $AllSearchComponents = @()
+    $topologyCommandSnapshots = New-Object 'System.Collections.Generic.List[object]'
 
     $ssas = Get-SPEnterpriseSearchServiceApplication
     foreach ($ssa in $ssas)
     {
         $topo = Get-SPEnterpriseSearchTopology -Active -SearchApplication $ssa
         $comps = Get-SPEnterpriseSearchComponent -SearchTopology $topo
+        $topologyCommandSnapshots.Add([pscustomobject]@{ applicationId = $ssa.Id; topology = $topo; components = @($comps) })
         foreach ($comp in $comps)
         {
             $SearchComponent = New-Object psobject
@@ -6534,6 +7263,18 @@ Function Get-SPDiagnosticsSearchTopologyLimits
     }
 
     $searchTopologyLimitsFindings = New-DiagnosticFinding -Name "Search Topology Limits" -Severity Default -InputObject $null -Format Table
+    $topologySnapshotFinding = if($null -ne $SnapshotFinding) { $SnapshotFinding } else { $searchTopologyLimitsFindings }
+    foreach($snapshot in $topologyCommandSnapshots)
+    {
+        $topologyScope = [ordered]@{ farmId = $script:SPFarm.Id; serviceApplicationId = $snapshot.applicationId }
+        Add-DiagnosticCommandSnapshot -Finding $topologySnapshotFinding -CommandName 'Get-SPEnterpriseSearchTopology' -Records $snapshot.topology -Scope $topologyScope -Source 'Get-SPEnterpriseSearchTopology -Active' -Coverage 'Active search topology per application inspected by the existing limits collector.' -IdentityProperties @('TopologyId') -PropertyNames @(
+            'TopologyId', 'State', 'CreationDate', 'ComponentCount'
+        )
+        $componentScope = [ordered]@{ farmId = $script:SPFarm.Id; serviceApplicationId = $snapshot.applicationId; topologyId = $snapshot.topology.TopologyId }
+        Add-DiagnosticCommandSnapshot -Finding $topologySnapshotFinding -CommandName 'Get-SPEnterpriseSearchComponent' -Records $snapshot.components -Scope $componentScope -Source 'Get-SPEnterpriseSearchComponent -SearchTopology' -Coverage 'Components of the active topology; runtime type distinguishes component roles.' -IdentityProperties @('ComponentId') -PropertyNames @(
+            'ComponentId', 'Name', 'ServerId', 'ServerName'
+        )
+    }
 
     $ComponentTypes = @("AdminComponent","CrawlComponent","ContentProcessingComponent","AnalyticsProcessingComponent","IndexComponent")
     $MaxCompPerServer = @(1,1,1,1,4)
@@ -6630,6 +7371,10 @@ function Get-SPDiagnosticSearchFindings
     $SSAs = Get-SPEnterpriseSearchServiceApplication  | Sort-Object Name 
 
     $searchFindings = New-DiagnosticFinding -Name "Search Information" -Severity Default -InputObject $null
+    Add-DiagnosticCommandSnapshot -Finding $searchFindings -CommandName 'Get-SPEnterpriseSearchServiceApplication' -Records $SSAs -Scope ([ordered]@{ farmId = $script:SPFarm.Id }) -Source 'Get-SPEnterpriseSearchServiceApplication' -Coverage 'Search applications returned by the existing collector; selected scalar settings only.' -PropertyNames @(
+        'Id', 'Name', 'DisplayName', 'Status', 'CloudIndex', 'SearchCenterUrl',
+        'DiscoveryMaxRowLimit', 'AlertsEnabled', 'AllowPartialResults', 'CrawlLogCleanupIntervalInDays', 'NeedsUpgrade'
+    )
     $searchFindings.Description += "Some findings may not show up if things are 'Ok'<br/> Ex: Search\HC instances, Server Name Mappings, Crawl Rules.<br/> If we do not find any values, then we will not report the finding."
 
     # Accumulator for content sources (across every SSA) that have no scheduled or continuous crawl.
@@ -6643,7 +7388,7 @@ function Get-SPDiagnosticSearchFindings
     }
 
     $searchFindings.ChildFindings.Add((Get-SPDiagnosticsSSASearchService))
-    $searchFindings.ChildFindings.Add((Get-SPDiagnosticsSearchTopologyLimits))
+    $searchFindings.ChildFindings.Add((Get-SPDiagnosticsSearchTopologyLimits -SnapshotFinding $searchFindings))
     $searchFindings.ChildFindings.Add((Get-SPDiagnosticsSSASearchInstances -searchApps $SSAs))
     $searchFindings.ChildFindings.Add((Get-SPDiagnosticsSSPJobInstances -searchApps $SSAs))
     $searchFindings.ChildFindings.Add((Get-SPDiagnosticsCheckForRoot -searchApps $SSAs))
@@ -6800,8 +7545,9 @@ function Get-SPDiagnosticsSSATimerJobs
     $build = Get-SPVersion
     $ssaJobNames = "Application " + $searchApplication.Id
     $ssaDispName = $searchApplication.DisplayName
-    $ssaJobs = Get-SPTimerJob | Where-Object{$_.Name -match $ssaJobNames} | Select-Object DisplayName, Id, Status, isDisabled, LockType, LastRunTime, Schedule
-    $finding = New-DiagnosticFinding -Name "SSA Related Timer Jobs" -InputObject $ssaJobs -format Table
+    $ssaJobs = Get-SPTimerJob | Where-Object{$_.Name -match $ssaJobNames}
+    $finding = New-DiagnosticFinding -Name "SSA Related Timer Jobs" -InputObject ($ssaJobs | Select-Object DisplayName, Id, Status, isDisabled, LockType, LastRunTime, Schedule) -format Table
+    Add-DiagnosticTimerJobSnapshot -Finding $finding -Jobs $ssaJobs -Scope ([ordered]@{ farmId = $script:SPFarm.Id; serviceApplicationId = $searchApplication.Id }) -Source 'Get-SPTimerJob filtered by search service application job-name prefix' -Coverage 'Jobs matched to this search service application by the existing collector; not all farm timer jobs.'
     if(($build -eq "SPSE" -or $build -eq "2019") -and $ssaJobs.Count -lt 9)
     {
         $finding.Severity = [SPDiagnostics.Severity]::Warning
@@ -7263,6 +8009,12 @@ function Get-SPDiagnosticsSSAContentSources
     $csFindingName = "Content Sources"
     $findingCollection = New-DiagnosticFinding -name $csFindingName -InputObject $null -Format table
     $contentSources = Get-SPEnterpriseSearchCrawlContentSource -SearchApplication $searchapplication -ErrorAction SilentlyContinue
+    Add-DiagnosticCommandSnapshot -Finding $findingCollection -CommandName 'Get-SPEnterpriseSearchCrawlContentSource' -Records $contentSources -Scope ([ordered]@{ farmId = $script:SPFarm.Id; serviceApplicationId = $searchApplication.Id }) -Source 'Get-SPEnterpriseSearchCrawlContentSource -SearchApplication' -Coverage 'Content sources in the selected search application; existing query errors remain in Error Collection. Numeric counters are captured before display formatting.' -PropertyNames @(
+        'Id', 'Name', 'Type', 'StartAddresses', 'SharePointCrawlBehavior',
+        'CrawlState', 'CrawlStatus', 'ContinuousCrawlStatus', 'CrawlPriority',
+        'SuccessCount', 'WarningCount', 'ErrorCount', 'DeleteCount', 'CrawlStarted',
+        'CrawlCompleted', 'EnableContinuousCrawls', 'FullCrawlSchedule', 'IncrementalCrawlSchedule'
+    )
     foreach ($contentSrc in $contentSources)
     {
         
@@ -9919,7 +10671,6 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
     $script:W3WPAppPoolAccount = $null
     $Script:ReportingFeatureId = "7094bd89-2cfe-490a-8c7e-fbace37b4a34"
     $script:UsageAndHealthDataCollectionProxyName = "Usage and Health Data Collection Proxy"
-    $script:SPFarm = $null
     $script:UsageDefinitionsWithReceivers = @("Analytics Usage","File IO","Page Requests","Simple Log Event Usage Data_SPUnifiedAuditEntry")
 
     if($PSversionTable.PSversion.Major -ge 5)
@@ -10151,6 +10902,10 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
         $finding = New-DiagnosticFinding -Name "SPUsageService Details" -Severity Default -Format List
     
         $SPUsageService = Get-SPUsageService
+        Add-DiagnosticCommandSnapshot -Finding $finding -CommandName 'Get-SPUsageService' -Records $SPUsageService -Scope ([ordered]@{ farmId = $script:SPFarm.Id }) -Source 'Get-SPUsageService' -Coverage 'Usage service settings collected only when UsageAndReporting runs.' -PropertyNames @(
+            'Id', 'Name', 'TypeName', 'Status', 'UsageLogDir', 'UsageLogMaxSpaceGB',
+            'UsageLogCutTime', 'LoggingEnabled', 'UsageLogMaxFileSize'
+        )
         if($null -eq $SPUsageService)
         {
             $finding.WarningMessage = "There is no SPUsageService. This will prevent .usage logs from being created"
@@ -10175,7 +10930,7 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
 
         $finding.InputObject = $SPUsageService
     
-        $instances = $SPUsageService.Instances | Select-Object $(Server), Status, NeedsUpgrade, CanUpgrade, IsBackwardsCompatible, ID, Parent, Version | sort-object Server
+        $instances = $SPUsageService.Instances | Select-Object Server, Status, NeedsUpgrade, CanUpgrade, IsBackwardsCompatible, ID, Parent, Version | sort-object Server
     
         if($SPUsageService.LoggingEnabled -eq $false)
         {
@@ -10258,6 +11013,7 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
            
             $jobname = $Job.Name
             $jobDefinitionFinding = New-DiagnosticFinding -Name "Job Definitions: $jobname" -Severity Default -Format List -InputObject $job
+            Add-DiagnosticTimerJobSnapshot -Finding $jobDefinitionFinding -Jobs $job -Scope ([ordered]@{ farmId = $script:SPFarm.Id; serviceId = $SPUsageService.Id }) -Source 'SPUsageService.JobDefinitions (existing command-equivalent service enumeration)' -Coverage 'Usage service job definitions inspected by the existing collector; not all farm timer jobs.'
             $JobHistoryFindingEntries = New-DiagnosticFinding -Name "Most Recent 20 Job History Entries" -Severity Default -Format Table 
 
             $JobHistoryEntries = $job.HistoryEntries | Sort-Object -Descending StartTime | Select-Object Servername, Status, StartTime, EndTime, ErrorMessage -First 20
@@ -10307,6 +11063,11 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
         $finding = New-DiagnosticFinding -Name "SPUsageDefinitions" -Severity Default -Format Table
         $definitions = Get-SPUsageDefinition
         $finding.InputObject = $definitions | Select-Object Name, Status, Enabled, EnableReceivers, Retention, DaysToKeepData, DaysToKeepUsageFiles, UsageDatabaseEnabled, TableName, MaxTotalSizeInBytes, Hidden, Description
+        Add-DiagnosticCommandSnapshot -Finding $finding -CommandName 'Get-SPUsageDefinition' -Records $definitions -Scope ([ordered]@{ farmId = $script:SPFarm.Id }) -Source 'Get-SPUsageDefinition' -Coverage 'Usage definitions collected only when UsageAndReporting runs; selected identity, retention, and enablement settings.' -PropertyNames @(
+            'Id', 'Name', 'Status', 'Enabled', 'EnableReceivers', 'Retention',
+            'DaysToKeepData', 'DaysToKeepUsageFiles', 'UsageDatabaseEnabled',
+            'TableName', 'MaxTotalSizeInBytes', 'Hidden', 'Description'
+        )
     
         foreach($definition in $definitions)
         {
@@ -10633,6 +11394,7 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
         
         $usageAnalyticsJobName = "Usage Analytics Timer Job for Search Application " + $script:ssa.Id
         $usageJob = Get-SPTimerJob | Where-Object{$_.Name -eq $usageAnalyticsJobName}
+        Add-DiagnosticTimerJobSnapshot -Finding $finding -Jobs $usageJob -Scope ([ordered]@{ farmId = $script:SPFarm.Id; serviceApplicationId = $script:ssa.Id }) -Source 'Get-SPTimerJob filtered by usage analytics job name' -Coverage 'The selected search application usage analytics job; not all farm timer jobs.'
     
         if($usageJob)
         {
@@ -10672,6 +11434,7 @@ function Get-SPDiagnosticUsageAndReportingInformation($siteUrl)
     
     
         $jobs = get-sptimerjob | Where-Object{$_.TypeName -like "Microsoft.Office.Server.Search.Analytics.AnalyticsJobDefinition"}
+        Add-DiagnosticTimerJobSnapshot -Finding $finding -Jobs $jobs -Scope ([ordered]@{ farmId = $script:SPFarm.Id; collectorServiceApplicationId = $script:ssa.Id }) -Source 'Get-SPTimerJob filtered by AnalyticsJobDefinition type' -Coverage 'Analytics job definitions inspected in the selected search application collector context; scope does not establish job ownership.'
     
         if($null -eq $jobs) 
         {
@@ -11452,15 +12215,41 @@ Function Get-SPDiagnosticsDCacheFinding
 
             #foreach ($CacheContainerType in [enum]::GetNames("Microsoft.SharePoint.DistributedCaching.Utilities.SPDistributedCacheContainerType"))
             $script:TotalDCacheBytes=0
+            $failedCacheStatistics=0
             foreach ($Cache in $Caches)
             {
-
-            if ($SPSE)
-            {
-                $css = Get-SPCacheStatistics -CacheName $cache.CacheName
-            } else {
-                $css = Get-CacheStatistics -CacheName $cache.CacheName
-            }
+                $css = $null
+                try
+                {
+                    if ($SPSE)
+                    {
+                        $css = Get-SPCacheStatistics -CacheName $cache.CacheName -ErrorAction Stop
+                    } else {
+                        $css = Get-CacheStatistics -CacheName $cache.CacheName -ErrorAction Stop
+                    }
+                    if ($null -eq $css)
+                    {
+                        throw "No statistics were returned."
+                    }
+                    $missingCounters = @(
+                        'Size', 'ItemCount', 'RegionCount', 'RequestCount',
+                        'ReadRequestCount', 'WriteRequestCount', 'MissCount',
+                        'IncomingBandwidth', 'OutgoingBandwidth'
+                    ) | Where-Object { $null -eq $css.$_ }
+                    if ($missingCounters)
+                    {
+                        throw "Statistics did not include required values: $($missingCounters -join ', ')."
+                    }
+                }
+                catch
+                {
+                    $message = "Could not collect Distributed Cache statistics for '$($cache.CacheName)': $($_.Exception.Message)"
+                    Write-Warning $message
+                    $DCacheStatisticsFindings.WarningMessage += $message
+                    $DCacheStatisticsFindings.Severity = [SPDiagnostics.Severity]::Warning
+                    $failedCacheStatistics++
+                    continue
+                }
                 $cs = New-Object PSObject 
                 $cs | Add-Member -MemberType NoteProperty -Name "Name" -value $cache.CacheName
                 $cs | Add-Member -MemberType NoteProperty -Name "Host" -value $($($cache.HostRegionMap.Keys[0]))
@@ -11477,7 +12266,18 @@ Function Get-SPDiagnosticsDCacheFinding
                 $script:TotalDCacheBytes += $css.Size
             }
             $DCacheStatisticsFindings.InputObject = $DCacheStatitistics 
-            $DCacheStatisticsFindings.Description +="Total Memory used for all cached data: $($script:TotalDCacheBytes.ToString('N0')) Bytes."
+            if ($failedCacheStatistics -eq 0)
+            {
+                $DCacheStatisticsFindings.Description +="Total Memory used for all cached data: $($script:TotalDCacheBytes.ToString('N0')) Bytes."
+            }
+            elseif ($DCacheStatitistics.Count -gt 0)
+            {
+                $DCacheStatisticsFindings.Description += "Partial results: memory used by $($DCacheStatitistics.Count) caches with available statistics: $($script:TotalDCacheBytes.ToString('N0')) Bytes. Statistics for $failedCacheStatistics caches could not be collected; total memory used for all cached data is unavailable."
+            }
+            else
+            {
+                $DCacheStatisticsFindings.Description += "Statistics for all $failedCacheStatistics queried caches could not be collected; total memory used for all cached data is unavailable."
+            }
         }
         $DCacheFindings.ChildFindings.Add(($DCacheStatisticsFindings))
 
@@ -11566,6 +12366,10 @@ Function Get-SPDiagnosticsDCacheFinding
         }
 
         $DCacheClientSettingsFindings.InputObject=$DCacheClientSettings 
+        foreach($settingsRecord in $DCacheClientSettings)
+        {
+            Add-DiagnosticCommandSnapshot -Finding $DCacheClientSettingsFindings -CommandName 'Get-SPDistributedCacheClientSetting' -Records $settingsRecord -Scope ([ordered]@{ farmId = $script:SPFarm.Id; containerType = $settingsRecord.Name }) -Source 'Get-SPDistributedCacheClientSetting -ContainerType (existing collector)' -Coverage 'Farm/container-type client settings inspected by the optional DistributedCache/Performance collector. Host is an optional display observation, may be null, and does not identify a per-host configuration query.' -IdentityProperties @('Name')
+        }
         $DCacheFindings.ChildFindings.Add(($DCacheClientSettingsFindings))
 
         #Ping Test for all DCache Ports
@@ -11602,12 +12406,18 @@ Function Get-SPDiagnosticsDCacheFinding
 #region WOPI / Office Online Server
 Function Get-OfficeOnlineServerFindings
 {
+    param([SPDiagnostics.Finding]$SnapshotFinding)
+
     $OfficeOnlineServerFindings = New-DiagnosticFinding -Name "Office Online Server " -InputObject $null -Format Table
+    $wopiSnapshotFinding = if($null -ne $SnapshotFinding) { $SnapshotFinding } else { $OfficeOnlineServerFindings }
     $WopiBindingsFinding = New-DiagnosticFinding -Name "WOPI Bindings" -InputObject $null -Format Table
     
 
     $DisplayWopiBindings = @()
     $wopiBindings = Get-SPWopiBinding
+    Add-DiagnosticCommandSnapshot -Finding $wopiSnapshotFinding -CommandName 'Get-SPWopiBinding' -Records $wopiBindings -Scope ([ordered]@{ farmId = $script:SPFarm.Id }) -Source 'Get-SPWopiBinding' -Coverage 'Existing WOPI binding inventory; composite identity retains distinct actions, extensions, and servers.' -IdentityProperties @('Application', 'Extension', 'ProgId', 'Action', 'ServerName', 'WopiZone') -PropertyNames @(
+        'Application', 'Extension', 'ProgId', 'Action', 'IsDefaultAction', 'ServerName', 'WopiZone'
+    )
     if ($WopiBindings)
     {
         foreach ($wopiBinding in $wopibindings)
@@ -11625,10 +12435,13 @@ Function Get-OfficeOnlineServerFindings
         $WopiBindingsFinding.InputObject = $DisplayWopiBindings
 
         $WopiZone = Get-SPWopiZone
+        Add-DiagnosticCommandSnapshot -Finding $wopiSnapshotFinding -CommandName 'Get-SPWopiZone' -Records ([pscustomobject]@{ Zone = $WopiZone }) -Scope ([ordered]@{ farmId = $script:SPFarm.Id }) -Source 'Get-SPWopiZone' -Coverage 'Zone queried by the existing collector only when WOPI bindings exist.' -IdentityProperties @()
         $OfficeOnlineServerFindings.Description += "Farm WOPI zone: $WopiZone"
         
         $WopiSuppressionsFinding = $null
         $WopiSuppressions = Get-SPWOPISuppressionSetting
+        $suppressionCommandRecords = @($WopiSuppressions | ForEach-Object { [pscustomobject]@{ Setting = [string]$_ } })
+        Add-DiagnosticCommandSnapshot -Finding $wopiSnapshotFinding -CommandName 'Get-SPWOPISuppressionSetting' -Records $suppressionCommandRecords -Scope ([ordered]@{ farmId = $script:SPFarm.Id }) -Source 'Get-SPWOPISuppressionSetting' -Coverage 'Suppression strings preserved without lossy splitting; queried only when WOPI bindings exist.' -IdentityProperties @('Setting')
         if ($WopiSuppressions)
         {
             $WopiSuppressionsReport= @()
@@ -11834,16 +12647,20 @@ Function Get-SPDiagnosticFarmNetworkLatency()
 #region Certificates in SPSE
 function Get-SPDiagnosticCertificateFindings
 {
+    param([SPDiagnostics.Finding]$SnapshotFinding)
+
     if ($Script:Build -ne "SPSE")
     {
         return $null
     } else {
         $CertificateFinding = New-DiagnosticFinding -Name "Managed Certificates" -InputObject $null -Format List
+        $certificateSnapshotFinding = if($null -ne $SnapshotFinding) { $SnapshotFinding } else { $CertificateFinding }
         if (IsElevated)
         {
 
             #Get all Certifcates in SPSE Cert Store with some properties
             $Certs = Get-SPCertificate | select-Object FriendlyName, CommonName,  NotBefore, NotAfter, Exportable, IsSelfSigned, Status, ID, storeType, Subject  #,AlternativeNames  #SAN is an array
+            Add-DiagnosticCommandSnapshot -Finding $certificateSnapshotFinding -CommandName 'Get-SPCertificate' -Records $Certs -Scope ([ordered]@{ farmId = $script:SPFarm.Id }) -Source 'Get-SPCertificate curated public metadata selection' -Coverage 'SharePoint SE certificate inventory when elevated; public identity, validity, and status only.'
             if ($Certs.Count -eq 0)
             {
                 return
@@ -11854,6 +12671,10 @@ function Get-SPDiagnosticCertificateFindings
 
             #Get the Default settings for Certificates in the Farm
             $certSettings = Get-SPCertificateSettings
+            Add-DiagnosticCommandSnapshot -Finding $certificateSnapshotFinding -CommandName 'Get-SPCertificateSettings' -Records $certSettings -Scope ([ordered]@{ farmId = $script:SPFarm.Id }) -Source 'Get-SPCertificateSettings' -Coverage 'Public expiration alert thresholds; existing query runs only on elevated SPSE with certificates present. Contact details excluded.' -IdentityProperties @() -PropertyNames @(
+                'CertificateExpirationAttentionThresholdDays', 'CertificateExpirationWarningThresholdDays',
+                'CertificateExpirationErrorThresholdDays'
+            )
 
             #Get the dates for Attention, Warning, Error
             $ad = $certSettings.CertificateExpirationAttentionThresholdDays
@@ -12914,12 +13735,12 @@ function main
         Select-SPDiagnosticSSA
     }
     
+    $rootFindingCollection = New-Object SPDiagnostics.FindingCollection[SPDiagnostics.Finding]
     if($UsageAndReporting -and $site)
     {
         $rootFindingCollection.Add((Get-SPDiagnosticUsageAndReportingInformation $site))
     }
 
-    $rootFindingCollection = New-Object SPDiagnostics.FindingCollection[SPDiagnostics.Finding]
     $supportDateFinding = Get-SPDiagnosticSupportDateFinding
     if ($null -ne $supportDateFinding -and (
             [int]$supportDateFinding.Severity -ge [int][SPDiagnostics.Severity]::Warning -or
@@ -12999,7 +13820,14 @@ function main
         }
     }
 
-    Set-Content -Value $diagnosticContent -LiteralPath $fileName
+    if($text)
+    {
+        Set-Content -Value $diagnosticContent -LiteralPath $fileName
+    }
+    else
+    {
+        Set-Content -Value $diagnosticContent -LiteralPath $fileName -Encoding UTF8
+    }
     
     
 
