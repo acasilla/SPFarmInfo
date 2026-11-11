@@ -140,7 +140,7 @@ if([System.IntPtr]::Size -lt 8)
     exit
 }
 
-$ScriptVersion="4.2.2610.2000"
+$ScriptVersion="4.3.2611.1100"
 $script:PreviousFindingTime= Get-Date
 
 # Retrieve parameters information
@@ -155,6 +155,108 @@ $script:hiddenParams = @(
     "SkipParameterMenu",
     "Text"
 )
+
+#region RemoteCimHelper
+# -----------------------------------------------------------------------------
+# Get-SPFICimInstance (Beta1)
+# Timeout-safe replacement for the legacy 'Get-WmiObject -ComputerName' calls.
+#
+# Why this exists:
+#   * Legacy Get-WmiObject uses DCOM/RPC (port 135 + a dynamic port range) and has
+#     NO connect-timeout knob. When a firewall silently drops packets, those calls
+#     can hang for minutes before failing.
+#   * This helper queries CIM over WSMan (WinRM, 5985/5986) instead, which honors
+#     operation timeouts, and it bounds the *connect* phase itself with a short
+#     async TCP pre-flight so an unreachable/firewalled host fails fast.
+#
+# Behavior:
+#   * Returns the CIM instance(s) on success.
+#   * On any failure it returns $null by default (matches -ErrorAction SilentlyContinue),
+#     or throws when -Stop is supplied (matches -ErrorAction Stop).
+#
+# NOTE: This swaps the transport from DCOM to WinRM for these specific calls. Hosts
+#       that answer over DCOM but have WinRM disabled will now be skipped rather than
+#       hanging. That is the intended trade-off for predictable, fast execution.
+# -----------------------------------------------------------------------------
+function Get-SPFICimInstance
+{
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$ComputerName,
+        [string]$ClassName,
+        [string]$Query,
+        [string]$Filter,
+        [string]$Namespace = "root\CIMV2",
+        [int]$OperationTimeoutSec = 10,
+        [int]$ConnectTimeoutMs = 3000,
+        [int[]]$WinRMPorts = @(5985),
+        [switch]$Stop
+    )
+
+    # 1) Fast pre-flight. WSMan has no short "open timeout" parameter, so bound the
+    #    connect phase ourselves with an async TCP connect we can abandon quickly.
+    $reachable = $false
+    foreach ($port in $WinRMPorts)
+    {
+        $client = $null
+        try
+        {
+            $client = [System.Net.Sockets.TcpClient]::new()
+            if ($client.ConnectAsync($ComputerName, $port).Wait($ConnectTimeoutMs) -and $client.Connected)
+            {
+                $reachable = $true
+            }
+        }
+        catch { }
+        finally { if ($null -ne $client) { $client.Close() } }
+        if ($reachable) { break }
+    }
+
+    if (-not $reachable)
+    {
+        $msg = "Get-SPFICimInstance: '$ComputerName' not reachable on WinRM port(s) $($WinRMPorts -join '/') within ${ConnectTimeoutMs}ms; skipping."
+        if ($Stop) { throw $msg }
+        Write-Verbose $msg
+        return $null
+    }
+
+    # 2) Run the query over a short-lived, timeout-bounded CIM/WSMan session.
+    $session = $null
+    try
+    {
+        $sessionOption = New-CimSessionOption -Protocol Wsman
+        $session = New-CimSession -ComputerName $ComputerName -SessionOption $sessionOption -OperationTimeoutSec $OperationTimeoutSec -ErrorAction Stop
+
+        $params = @{
+            CimSession          = $session
+            OperationTimeoutSec = $OperationTimeoutSec
+            ErrorAction         = 'Stop'
+        }
+        if ($Query)
+        {
+            $params['Query'] = $Query
+        }
+        else
+        {
+            $params['ClassName'] = $ClassName
+            $params['Namespace'] = $Namespace
+            if ($Filter) { $params['Filter'] = $Filter }
+        }
+
+        Get-CimInstance @params
+    }
+    catch
+    {
+        if ($Stop) { throw }
+        Write-Verbose "Get-SPFICimInstance: query against '$ComputerName' failed: $($_.Exception.Message)"
+        return $null
+    }
+    finally
+    {
+        if ($null -ne $session) { Remove-CimSession -CimSession $session -ErrorAction SilentlyContinue }
+    }
+}
+#endregion RemoteCimHelper
 
 #region CoreFramework
 
@@ -366,7 +468,7 @@ function New-DiagnosticFinding
     }
 
     #Write-Host ("{0} Generating finding -- {1}" -f $findingTime, $Name)
-    Write-Host ("Generated finding -- {0}" -f $Name)
+    Write-Host ("Generated finding -- {0} | Duration:({1}ms)" -f $Name, $findingDuration)
 
     $finding = New-Object SPDiagnostics.Finding
     $finding.Name = $Name
@@ -3466,7 +3568,7 @@ function Get-WindowsSerivcesOnServer
     $servers = $script:servers | Where-Object {$_.role -ne "Invalid"}
     foreach ($server in $servers)
     {
-        $Services =  Get-WmiObject "Win32_Service" -ComputerName $server.name | Where-Object {$_.name -in $ServicesList} | Sort-Object DisplayName
+        $Services =  Get-SPFICimInstance -ComputerName $server.name -ClassName "Win32_Service" | Where-Object {$_.name -in $ServicesList} | Sort-Object DisplayName
         foreach ($s in $services)
         {
             $wServiceInfo = new-object psobject
@@ -3784,10 +3886,24 @@ function Get-SPDiagnosticServicesOnServer
     Param()
     $finding = New-DiagnosticFinding -Name "Service Instances on Server(s)" -InputObject $null -Description "This should be equivalent to what we see in Central Admin on page '/_admin/FarmServices.aspx'<br/>" -Format Table
     $runningServices = @()
+
+    #Core SharePoint service instances that should be Online on every provisioned server. These are included
+    #in the table (and flagged below) even when Disabled, so a core service that was stopped/disabled manually
+    #on a server is surfaced instead of being silently filtered out.
+    $CoreAlwaysOnServiceTypes = @(
+        "Microsoft SharePoint Foundation Tracing",
+        "Microsoft SharePoint Foundation Timer",
+        "Microsoft SharePoint Foundation Administration"
+    )
+
     $servers = $script:servers #| Where-Object{$_.Role -ne [Microsoft.SharePoint.Administration.SPServerRole]::Invalid}
     foreach($server in $servers)
     {
-        $services = $server.ServiceInstances | Where-Object{$_.Status -ne [Microsoft.SharePoint.Administration.SPObjectStatus]::Disabled}
+        #Show non-Disabled instances as usual, plus any core always-on service that is Disabled on this server.
+        $services = $server.ServiceInstances | Where-Object{
+            $_.Status -ne [Microsoft.SharePoint.Administration.SPObjectStatus]::Disabled -or
+            $CoreAlwaysOnServiceTypes -contains $_.TypeName
+        }
         foreach ($service in $services)
         {
             if($service.DisplayName -match "Search Data Acces")
@@ -3831,10 +3947,122 @@ function Get-SPDiagnosticServicesOnServer
     $troubleServices = $runningServices | Where-Object{$_.Status -ne [Microsoft.SharePoint.Administration.SPObjectStatus]::Online}
     if($null -ne $troubleServices)
     {
-        $finding.Severity = [SPDiagnostics.Severity]::Warning
-        $finding.WarningMessage = "One or more services identified in a starting or stopping state"
+        $finding.Severity = [SPDiagnostics.Severity]::Critical
+        $finding.WarningMessage += "One or more service instances are not in an 'Online' state (a core service shown as 'Disabled' was likely stopped or disabled manually on that server):"
+        foreach($ts in $troubleServices)
+        {
+            $finding.WarningMessage += " - Server '$($ts.Server)': '$($ts.Service)' is '$($ts.Status)' (Id: $($ts.Id))"
+        }
+        $finding.WarningMessage += "To start a stopped service instance, run the following using the Id shown in the table:<br/><div class=`"code`">Start-SPServiceInstance -Identity 'PasteIdHere'</div>"
     }
     $finding.ChildFIndings.add((Get-SPRequestManagementServiceFinding))
+    return $finding
+}
+
+function Get-SPDiagnosticsContentDatabaseRegistrationDiscrepancyFinding
+{
+    [cmdletbinding()]
+    Param()
+
+    $spDatabaseContentDbs = @($script:spDatabases | Where-Object { $_.TypeName -eq "Content Database" })
+    if($spDatabaseContentDbs.Count -le 0)
+    {
+        return $null
+    }
+
+    # Central Administration content databases may not be returned by Get-SPContentDatabase,
+    # so exclude them from this discrepancy check to avoid false positives.
+    $centralAdminContentDbIds = @{}
+    try
+    {
+        $caWebApps = @(Get-SPWebApplication -IncludeCentralAdministration -ErrorAction Stop | Where-Object { $_.IsAdministrationWebApplication })
+        foreach($caWebApp in $caWebApps)
+        {
+            foreach($caDb in @($caWebApp.ContentDatabases))
+            {
+                if($null -ne $caDb -and $null -ne $caDb.Id)
+                {
+                    $centralAdminContentDbIds[[string]$caDb.Id] = $true
+                }
+            }
+        }
+    }
+    catch
+    {
+        # Best effort only; if this lookup fails we continue with the original comparison logic.
+    }
+
+    $spContentDatabases = @()
+    try
+    {
+        $spContentDatabases = @(Get-SPContentDatabase -ErrorAction Stop)
+    }
+    catch
+    {
+        return $null
+    }
+
+    $contentDbIds = @{}
+    foreach($contentDb in $spContentDatabases)
+    {
+        if($null -eq $contentDb -or $null -eq $contentDb.Id) { continue }
+        $contentDbIds[[string]$contentDb.Id] = $true
+    }
+
+    # Additional confidence filter: collect content DB IDs referenced by non-admin web apps.
+    # If a DB is still referenced there, we skip flagging it to reduce false positives from
+    # command-scope or enumeration quirks.
+    $nonAdminWebAppContentDbIds = @{}
+    try
+    {
+        $nonAdminWebApps = @(Get-SPWebApplication -IncludeCentralAdministration -ErrorAction Stop | Where-Object { -not $_.IsAdministrationWebApplication })
+        foreach($webApp in $nonAdminWebApps)
+        {
+            foreach($waDb in @($webApp.ContentDatabases))
+            {
+                if($null -ne $waDb -and $null -ne $waDb.Id)
+                {
+                    $nonAdminWebAppContentDbIds[[string]$waDb.Id] = $true
+                }
+            }
+        }
+    }
+    catch
+    {
+        # Best effort only; keep original behavior if this lookup fails.
+    }
+
+    $missingFromGetSpContentDb = @()
+    foreach($db in $spDatabaseContentDbs)
+    {
+        if($null -eq $db -or $null -eq $db.Id) { continue }
+        if($centralAdminContentDbIds.ContainsKey([string]$db.Id)) { continue }
+        if($nonAdminWebAppContentDbIds.ContainsKey([string]$db.Id)) { continue }
+        if(-not $contentDbIds.ContainsKey([string]$db.Id))
+        {
+            $missingFromGetSpContentDb += [pscustomobject]@{
+                Name                 = $db.Name
+                Id                   = [string]$db.Id
+                TypeName             = $db.TypeName
+                DatabaseServer       = $db.NormalizedDataSource
+                Status               = [string]$db.Status
+                BuildVersion         = [string]$db.BuildVersion
+                Exists               = [bool]$db.Exists
+                NeedsUpgrade         = [bool]$db.NeedsUpgrade
+                NeedsUpgradeChildren = [bool]$db.NeedsUpgradeIncludeChildren
+            }
+        }
+    }
+
+    if($missingFromGetSpContentDb.Count -le 0)
+    {
+        return $null
+    }
+
+    $finding = New-DiagnosticFinding -Name "Content Database Registration Discrepancy" -InputObject $missingFromGetSpContentDb -Format Table -Severity Critical
+    $finding.WarningMessage += "These databases are returned by Get-SPDatabase as TypeName 'Content Database' but are missing from Get-SPContentDatabase."
+    $finding.WarningMessage += "This can indicate registration metadata inconsistencies that may affect mount/attach operations."
+    $finding.WarningMessage += "Remediation: for each affected database listed below, remove the stale Get-SPDatabase registration entry using:<br/><div class=`"code`">`$db = Get-SPDatabase | ?{`$_.Name -eq `"<DB name>`"}; `$db.Delete()</div>"
     return $finding
 }
 
@@ -3856,6 +4084,11 @@ function Get-SPDatabasesInFarm
         'Id', 'Name', 'TypeName', 'NormalizedDataSource', 'Status', 'BuildVersion',
         'IsReadOnly', 'Encrypt', 'IsSqlAzure', 'Exists', 'NeedsUpgrade'
     )
+    $contentDbRegistrationDiscrepancy = Get-SPDiagnosticsContentDatabaseRegistrationDiscrepancyFinding
+    if($null -ne $contentDbRegistrationDiscrepancy)
+    {
+        $spDatabasesInFarmFinding.ChildFindings.Add($contentDbRegistrationDiscrepancy)
+    }
 	return $spDatabasesInFarmFinding
 }
 
@@ -3909,7 +4142,12 @@ function Get-SPDiagnosticHealthAnalyzerFinding
         $HAEntry | Add-Member -membertype NoteProperty -Name "Description" -Value $HALe.Title 
         $HAEntry | Add-Member -membertype NoteProperty -Name "Failing Servers" -Value $($HALe["ows_HealthReportServers"])
         $HAEntry | Add-Member -membertype NoteProperty -Name "Failing Services" -Value $HALe["ows_HealthReportServices"] 
-        $HAEntry | Add-Member -membertype NoteProperty -Name "Remedy" -Value ($HALe["Remedy"]).Replace($w.Url,$($w.Url))
+        $remedyText = [string]$HALe["Remedy"]
+        if ($null -ne $w -and $null -ne $w.Url)
+        {
+            $remedyText = $remedyText.Replace($w.Url, $w.Url)
+        }
+        $HAEntry | Add-Member -membertype NoteProperty -Name "Remedy" -Value $remedyText
         $HAEntry | Add-Member -membertype NoteProperty -Name "Modified" -Value $HALe["Modified"]
 
         if ($HALe["Severity"].SubString(0,1) -le $MinSeverity)
@@ -4714,6 +4952,152 @@ function Get-SPDiagnosticWebAppObjectCacheUserFinding($webapp)
 	return $ObjectCacheUserfinding								  
 }
 
+function Get-SPDiagnosticsWebAppContentDatabaseCacheReferenceFinding
+{
+    [CmdletBinding()]
+    Param(
+        [Parameter(Mandatory=$true)]
+        [Object[]]
+        $WebApplications
+    )
+
+    if([string]::IsNullOrWhiteSpace($env:ProgramData))
+    {
+        return $null
+    }
+
+    $configRoot = Join-Path $env:ProgramData "Microsoft\SharePoint\Config"
+    if(!(Test-Path -LiteralPath $configRoot))
+    {
+        return $null
+    }
+
+    $cacheFolders = @(Get-ChildItem -Path $configRoot -Directory -ErrorAction SilentlyContinue | Where-Object {
+        Test-Path (Join-Path $_.FullName "cache.ini")
+    })
+
+    if($cacheFolders.Count -le 0)
+    {
+        return $null
+    }
+
+    $findings = @()
+    foreach($webApp in $WebApplications)
+    {
+        $xmlFile = $null
+        foreach($cacheFolder in $cacheFolders)
+        {
+            $candidate = Join-Path $cacheFolder.FullName "$($webApp.Id).xml"
+            if(Test-Path -LiteralPath $candidate)
+            {
+                $xmlFile = $candidate
+                break
+            }
+        }
+        if($null -eq $xmlFile) { continue }
+
+        try
+        {
+            [xml]$xml = Get-Content -Path $xmlFile -Raw -ErrorAction Stop
+        }
+        catch
+        {
+            continue
+        }
+
+        $databaseDictionary = $xml.SelectSingleNode("//fld[@name='m_ContentDatabases']/object/fld[@name='m_Databases']")
+        if($null -eq $databaseDictionary) { continue }
+
+        $nodes = @($databaseDictionary.ChildNodes)
+        for($i = 0; $i -lt $nodes.Count; $i++)
+        {
+            $keyNode = $nodes[$i]
+            if($keyNode.Name -ne "sFld" -or [string]$keyNode.type -ne "Guid")
+            {
+                continue
+            }
+
+            $databaseId = $keyNode.InnerText.Trim()
+            if([string]::IsNullOrWhiteSpace($databaseId))
+            {
+                continue
+            }
+
+            if(($i + 1) -ge $nodes.Count)
+            {
+                $findings += [pscustomobject]@{
+                    WebApplication   = $webApp.Name
+                    WebApplicationId = [string]$webApp.Id
+                    Url              = $webApp.Url
+                    DatabaseId       = $databaseId
+                    Issue            = "MissingValue"
+                    ValueType        = $null
+                    ValueId          = $null
+                    CacheFile        = $xmlFile
+                }
+                continue
+            }
+
+            $valueNode = $nodes[$i + 1]
+            if($valueNode.Name -eq "fld" -and [string]$valueNode.type -eq "null")
+            {
+                $findings += [pscustomobject]@{
+                    WebApplication   = $webApp.Name
+                    WebApplicationId = [string]$webApp.Id
+                    Url              = $webApp.Url
+                    DatabaseId       = $databaseId
+                    Issue            = "NullReference"
+                    ValueType        = [string]$valueNode.type
+                    ValueId          = $null
+                    CacheFile        = $xmlFile
+                }
+                continue
+            }
+
+            $valueType = [string]$valueNode.type
+            $valueId = $valueNode.InnerText.Trim()
+            if($valueType -like "Microsoft.SharePoint.Administration.SPContentDatabase,*")
+            {
+                if($databaseId -ne $valueId)
+                {
+                    $findings += [pscustomobject]@{
+                        WebApplication   = $webApp.Name
+                        WebApplicationId = [string]$webApp.Id
+                        Url              = $webApp.Url
+                        DatabaseId       = $databaseId
+                        Issue            = "GuidMismatch"
+                        ValueType        = $valueType
+                        ValueId          = $valueId
+                        CacheFile        = $xmlFile
+                    }
+                }
+            }
+            else
+            {
+                $findings += [pscustomobject]@{
+                    WebApplication   = $webApp.Name
+                    WebApplicationId = [string]$webApp.Id
+                    Url              = $webApp.Url
+                    DatabaseId       = $databaseId
+                    Issue            = "UnexpectedValueType"
+                    ValueType        = $valueType
+                    ValueId          = $valueId
+                    CacheFile        = $xmlFile
+                }
+            }
+        }
+    }
+
+    if($findings.Count -le 0)
+    {
+        return $null
+    }
+
+    $finding = New-DiagnosticFinding -Name "Web Application Content Database Cache Reference Anomalies" -InputObject $findings -Format Table -Severity Warning
+    $finding.WarningMessage += "One or more web application content database cache entries are invalid (null, missing value, GUID mismatch, or unexpected value type)."
+    return $finding
+}
+
 function Get-SPDiagnosticsWebAppsFinding
 {
     [cmdletbinding()]
@@ -4732,6 +5116,7 @@ function Get-SPDiagnosticsWebAppsFinding
     {
         $webAppSiteCount = $null
         $webAppSiteCount = $webApp.Sites.Count
+        $waId = $webApp.Id
         # Task 535: Add table for webapps similar to Central Admin
         # get the default zone port:
         $dfltSettings = $webApp.IisSettings[[Microsoft.SharePoint.Administration.SPUrlZone]::Default]
@@ -4789,7 +5174,7 @@ function Get-SPDiagnosticsWebAppsFinding
             'RecycleBinCleanupEnabled', 'RecycleBinRetentionPeriod', 'SecondStageRecycleBinQuota',
             'SharePoint2010WorkflowsEnabled', 'DisableCoauthoring', 'AllowDesigner', 'RequiredDesignerVersion'
         )
-        $webAppFinding.Description += " Site Count: (" +$webAppSiteCount +")"
+        $webAppFinding.Description += " Site Count: (" + $webAppSiteCount +") || WebApp ID:  $waId "
 
 
         # itterate through aams to get zones to check to be sure to not miss manually created aams
@@ -4960,6 +5345,13 @@ function Get-SPDiagnosticsWebAppsFinding
     # block per web app to be promoted into the Informational Items section. It is now a single
     # finding with a leading "Web Application" column.
     $webAppsFinding.ChildFindings.Add((Get-ContentDBFileSizeAndGrowthFinding $webApps))
+
+    # Only emit this finding when anomalous content-database cache references are actually detected.
+    $contentDbCacheReferenceFinding = Get-SPDiagnosticsWebAppContentDatabaseCacheReferenceFinding -WebApplications $webApps
+    if($null -ne $contentDbCacheReferenceFinding)
+    {
+        $webAppsFinding.ChildFindings.Add($contentDbCacheReferenceFinding)
+    }
 
     $webAppsFinding.InputObject = $webAppList
     $webAppsFinding.Format = [SPDiagnostics.Format]::Table
@@ -5369,115 +5761,194 @@ function Get-SPWebAppServiceAppProxiesFinding($webapp)
 
 function Get-SPDiagnosticsExtraBindingsOnIIS ($webapp, $zone)
 {
-    #search for extra IIS Bindings on local IIS 
-    $IIS_Bindingfinding = New-DiagnosticFinding -Name "IIS Binding on IIS server '$($env:COMPUTERNAME)'" -Severity Default -InputObject $null -Format Table
+    #Collect the literal IIS Manager bindings for this web application's IIS site from EVERY server that hosts
+    #the Web Application role (or Central Administration for the admin web app) - not just the server running
+    #this script. This avoids the "Web site does not exist" warning when the script runs on a server that does
+    #not host the web application, and reports bindings from all relevant servers in a single table.
+    $IIS_Bindingfinding = New-DiagnosticFinding -Name "IIS Manager Bindings" -Severity Default -InputObject $null -Format Table
 
-    if ((IsElevated))
+    if (!(IsElevated))
     {
-        if (!($Script:Build -eq "2013"))
+        $IIS_Bindingfinding.Description += "This data can only be collected when the Script is executed with 'Run as Administrator'"
+        return $IIS_Bindingfinding
+    }
+
+    if ($Script:Build -eq "2013")
+    {
+        $IIS_Bindingfinding.Description += "This data can't be collected on SharePoint Server 2013"
+        return $IIS_Bindingfinding
+    }
+
+    if (!($webapp.IisSettings.Keys -contains $zone))
+    {
+        return $IIS_Bindingfinding
+    }
+
+    $iisSettings = $webApp.IisSettings[$zone]
+    if ($null -eq $iisSettings)
+    {
+        return $IIS_Bindingfinding
+    }
+
+    $siteName = $iisSettings.ServerComment
+
+    #Servers that host this web application's IIS site.
+    if ($webapp.IsAdministrationWebApplication)
+    {
+        $servers = Get-SPServiceInstance |
+            Where-Object { $_.TypeName -eq "Central Administration" -and $_.Status -eq "Online" } |
+            Select-Object -ExpandProperty Server |
+            Select-Object -ExpandProperty Address
+    }
+    else
+    {
+        $servers = Get-SPServiceInstance |
+            Where-Object { $_.TypeName -eq "Microsoft SharePoint Foundation Web Application" -and $_.Status -eq "Online" } |
+            Select-Object -ExpandProperty Server |
+            Select-Object -ExpandProperty Address
+    }
+    $servers = @($servers | Select-Object -Unique)
+
+    #Runs on each target server and returns the literal IIS bindings for the site.
+    $bindingScriptBlock = {
+        param($SiteName)
+        Import-Module WebAdministration -ErrorAction SilentlyContinue
+        $site = Get-Website | Where-Object { $_.Name -eq $SiteName }
+        if ($null -eq $site)
         {
-            if ($webapp.IisSettings.Keys -contains $zone)
-            {
-                $iisSettings = $webApp.IisSettings[$zone]
-                if($null -ne $iisSettings)
-                {
-
-                    $bis = @()
-                    $IIS_Bindings = (Get-IISSite  $iisSettings.ServerComment).Bindings | Select-Object protocol,BindingInformation
-                    $IIS_Bindings | ForEach-Object {$_.BindingInformation = $_.BindingInformation}
-
-                    $bhelper =@()
-                    foreach ($b in $IIS_Bindings)
-                    {                           
-                        $bx = $b.Protocol
-                        $u= $b.bindingInformation.split(':')[2]
-                        # if ([String]::IsNullOrEmpty($u)) {$u = $env:COMPUTERNAME}
-                        $bx = $b.Protocol +"://" + $u
-                        $ip = $b.BindingInformation.split(":")[0]
-                        $p =$b.bindingInformation.split(':')[1]
-                        if (!($p -eq "80" -or $p -eq "443"))
-                        {
-                            $bx += ":" + $p
-                        }
-
-                        $bi = new-object PSObject 
-                        $bi | Add-Member -MemberType NoteProperty -name "Protocol" -value $b.Protocol
-                        $bi | Add-Member -MemberType NoteProperty -name "IPAddress" -value $($ip)
-                        $bi | Add-Member -MemberType NoteProperty -name "port" -value $($p)
-                        $bi | Add-Member -MemberType NoteProperty -name "Hostname" -value $($u)
-                        $bis += $bi
-                        $bhelper +=$bx
-
-                    }
-                    $IIS_Bindingfinding.InputObject = $bis 
-
-                    $aams = Get-SPAlternateURL -WebApplication $webApp -zone $zone
-                    foreach ($aam in $AAMs)
-                    {
-                        $IIS_BindingExistsAsAAM=$false
-                        foreach ($bx in $bhelper)
-                        {
-                            if ($aam.IncomingUrl -eq $bx)
-                            {
-                                $IIS_BindingExistsAsAAM = $true
-                                #break
-                            } 
-
-                            $bxHostName = $bx.Substring($bx.IndexOf("://")+3).Split(":")[0]
-                            # $bxProtocol = $bx.Split(":")[0]
-                            if([string]::IsNullOrEmpty($bxHostName)) ## empty host header binding, evaluate if protocol and port match
-                            {
-                                $IIS_BindingExistsAsAAM = Get-AamBindingAndPortMatch -aamUri $aam.IncomingUrl -bindingUri $bx
-                            }
-
-                        }
-                        if (!$IIS_BindingExistsAsAAM)
-                        {
-                            $IIS_Bindingfinding.WarningMessage += "In WebApplication  $($($WebApp.Name)) in the $zone zone, the AAM '$($aam.IncomingUrl)' does not exist as an IISBinding"
-                            $IIS_Bindingfinding.Severity = [SPDiagnostics.Severity]::Warning 
-                            break
-                        } 
-                    }
-
-
-                    foreach ($bx in $bhelper)
-                    {
-                        $AAM_Exists_as_IIS_Binding = $false
-                        foreach ($aam in $AAMs)
-                        {
-                            if ($aam.IncomingUrl -eq $bx)
-                            {
-                               $AAM_Exists_as_IIS_Binding = $true
-                                #break
-                            }
-                            
-                            $bxHostName = $bx.Substring($bx.IndexOf("://")+3).Split(":")[0]
-                            # $bxProtocol = $bx.Split(":")[0]
-                            if([string]::IsNullOrEmpty($bxHostName)) ## empty host header binding, evaluate if protocol and port match
-                            {
-                                $AAM_Exists_as_IIS_Binding = Get-AamBindingAndPortMatch -aamUri $aam.IncomingUrl -bindingUri $bx
-                            }
-
-                        }
-                        if (!$AAM_Exists_as_IIS_Binding)
-                        {
-                            $IIS_Bindingfinding.WarningMessage += "In WebApplication $($($WebApp.Name)) in the $Zone zone, the IIS Binding '$($($b.BindingInformation))' is not known in SharePoint as AAM`n"       
-                            $IIS_Bindingfinding.Severity = [SPDiagnostics.Severity]::Warning 
-                            break
-                        }
-                    }
-                } 
-            }
-            else 
-            {
-                $IIS_Bindingfinding.Description += "This data can't be collected on SharePoint Server 2013"
+            return [PSCustomObject]@{
+                Server             = $env:COMPUTERNAME
+                SiteName           = $SiteName
+                Protocol           = $null
+                IPAddress          = $null
+                Port               = $null
+                Hostname           = $null
+                BindingInformation = $null
+                SiteFound          = $false
             }
         }
-        else 
+        $rows = @()
+        foreach ($b in @(Get-WebBinding -Name $SiteName -ErrorAction SilentlyContinue))
         {
-            $iis_BindingFinding.Description += "This data can only be collected when the Script is executed with 'Run as Administrator'"
+            $bindInfo = [string]$b.bindingInformation
+            $parts = $bindInfo.Split(':')
+            $rows += [PSCustomObject]@{
+                Server             = $env:COMPUTERNAME
+                SiteName           = $SiteName
+                Protocol           = [string]$b.protocol
+                IPAddress          = $parts[0]
+                Port               = $parts[1]
+                Hostname           = $parts[2]
+                BindingInformation = $bindInfo
+                SiteFound          = $true
+            }
+        }
+        if ($rows.Count -eq 0)
+        {
+            $rows += [PSCustomObject]@{
+                Server             = $env:COMPUTERNAME
+                SiteName           = $SiteName
+                Protocol           = $null
+                IPAddress          = $null
+                Port               = $null
+                Hostname           = $null
+                BindingInformation = $null
+                SiteFound          = $true
+            }
+        }
+        return $rows
+    }
+
+    $allRows = @()
+    $serversWithoutSite = @()
+    foreach ($server in $servers)
+    {
+        try
+        {
+            if ($server -eq $env:COMPUTERNAME)
+            {
+                $res = & $bindingScriptBlock -SiteName $siteName
+            }
+            else
+            {
+                $res = Invoke-Command -ComputerName $server -ScriptBlock $bindingScriptBlock -ArgumentList $siteName -ErrorAction Stop
+            }
+            foreach ($r in $res)
+            {
+                if (-not $r.SiteFound) { $serversWithoutSite += $r.Server; continue }
+                if ($null -ne $r.BindingInformation) { $allRows += $r }
+            }
+        }
+        catch
+        {
+            $IIS_Bindingfinding.WarningMessage += "Unable to collect IIS bindings from server '$server': $($_.Exception.Message)"
+            $IIS_Bindingfinding.Severity = [SPDiagnostics.Severity]::Warning
         }
     }
+
+    $IIS_Bindingfinding.InputObject = @($allRows | Select-Object Server, SiteName, Protocol, IPAddress, Port, Hostname, BindingInformation)
+
+    if ($serversWithoutSite.Count -gt 0)
+    {
+        $IIS_Bindingfinding.Description += "The IIS site '$siteName' was not found on the following server(s) that host the Web Application role: " + ($serversWithoutSite -join ', ') + "."
+    }
+
+    #Cross-check the AAMs for this zone against the collected IIS bindings.
+    $bhelper = @()
+    foreach ($r in $allRows)
+    {
+        if ($null -eq $r.Protocol) { continue }
+        $bx = $r.Protocol + "://" + $r.Hostname
+        if (!($r.Port -eq "80" -or $r.Port -eq "443")) { $bx += ":" + $r.Port }
+        $bhelper += $bx
+    }
+    $bhelper = @($bhelper | Select-Object -Unique)
+
+    $aams = Get-SPAlternateURL -WebApplication $webApp -zone $zone
+
+    $missingAamAsBinding = @()
+    foreach ($aam in $aams)
+    {
+        $exists = $false
+        foreach ($bx in $bhelper)
+        {
+            if ($aam.IncomingUrl -eq $bx) { $exists = $true }
+            $bxHostName = $bx.Substring($bx.IndexOf("://") + 3).Split(":")[0]
+            if ([string]::IsNullOrEmpty($bxHostName))
+            {
+                if (Get-AamBindingAndPortMatch -aamUri $aam.IncomingUrl -bindingUri $bx) { $exists = $true }
+            }
+        }
+        if (!$exists) { $missingAamAsBinding += $aam.IncomingUrl }
+    }
+
+    $extraBindings = @()
+    foreach ($bx in $bhelper)
+    {
+        $exists = $false
+        foreach ($aam in $aams)
+        {
+            if ($aam.IncomingUrl -eq $bx) { $exists = $true }
+            $bxHostName = $bx.Substring($bx.IndexOf("://") + 3).Split(":")[0]
+            if ([string]::IsNullOrEmpty($bxHostName))
+            {
+                if (Get-AamBindingAndPortMatch -aamUri $aam.IncomingUrl -bindingUri $bx) { $exists = $true }
+            }
+        }
+        if (!$exists) { $extraBindings += $bx }
+    }
+
+    if ($missingAamAsBinding.Count -gt 0)
+    {
+        $IIS_Bindingfinding.WarningMessage += "In WebApplication $($WebApp.Name), $zone zone, the following AAM(s) do not exist as an IIS Binding: " + ($missingAamAsBinding -join ', ')
+        $IIS_Bindingfinding.Severity = [SPDiagnostics.Severity]::Warning
+    }
+    if ($extraBindings.Count -gt 0)
+    {
+        $IIS_Bindingfinding.WarningMessage += "In WebApplication $($WebApp.Name), $zone zone, the following IIS Binding(s) are not known in SharePoint as an AAM: " + ($extraBindings -join ', ')
+        $IIS_Bindingfinding.Severity = [SPDiagnostics.Severity]::Warning
+    }
+
     return $IIS_Bindingfinding
 }
 
@@ -6656,7 +7127,7 @@ function Get-SPDiagnosticsSPTrustedIdentityTokenIssuerFinding
             UseWReplyParameter,
             UseWHomeRealmParameter,
             GroupClaimType,
-            @{l="RegisteredIssuerName";e={RegisteredIssuerName}},
+            @{l="RegisteredIssuerName";e={$_.RegisteredIssuerName}},
             DefaultClientIdentifier,
             @{l="AuthorizationEndPointUri";e={$_.AuthorizationEndPointUri}},
             TrustedLoginMethod,
@@ -6943,6 +7414,7 @@ Function Get-KerberosEncTypeLabel($Value)
 Function Get-SPDiagnosticKerberosFindings
 {
     $KerberosFindings = New-DiagnosticFinding -Name "Kerberos configuration" -InputObject $null -Format List
+    $KerberosFindings.Description += "- This check reviews Kerberos encryption settings for SharePoint managed accounts (from Active Directory attribute msDS-SupportedEncryptionTypes) and farm servers (registry Policy and LSA Kerberos keys).<br/> - Windows updates in recent years tightened Kerberos defaults toward AES128/AES256 and away from RC4/DES, so accounts and server policy should be aligned with AES support."
 
     if (!(IsElevated))
     {
@@ -7190,6 +7662,8 @@ Function Get-SPDiagnosticKerberosFindings
     # Warning banner (kept from the original console version) + reference link
     # ---------------------------------------------------------------------------------------------
     $KerberosFindings.ReferenceLink += "https://learn.microsoft.com/en-us/sharepoint/troubleshoot/security/configuration-to-support-kerberos-aes-encryption"
+    $KerberosFindings.ReferenceLink += "https://learn.microsoft.com/en-us/troubleshoot/windows-server/windows-security/kerberos-protocol-registry-kdc-configuration-keys"
+    $KerberosFindings.ReferenceLink += "https://learn.microsoft.com/en-us/windows/security/threat-protection/security-policy-settings/network-security-configure-encryption-types-allowed-for-kerberos"
 
     if ($warn)
     {
@@ -7220,10 +7694,10 @@ Function Get-SPDiagnosticKerberosFindings
     $summaryFinding = New-DiagnosticFinding -Name "Kerberos Summary" -InputObject $summaryRows -Format Table
     $KerberosFindings.ChildFindings.Add($summaryFinding)
 
-    $acctFinding = New-DiagnosticFinding -Name "Managed Account Encryption Types" -InputObject $accountRows -Format Table
+    $acctFinding = New-DiagnosticFinding -Name "Managed Account Encryption Types" -InputObject $accountRows -Format Table -Description "Values in this table are read from Active Directory for each SP managed account (samAccountName lookup), including msDS-SupportedEncryptionTypes and servicePrincipalName."
     $KerberosFindings.ChildFindings.Add($acctFinding)
 
-    $srvFinding = New-DiagnosticFinding -Name "Server OS Kerberos Encryption Policy (Registry)" -InputObject $serverRows -Format Table
+    $srvFinding = New-DiagnosticFinding -Name "Server OS Kerberos Encryption Policy (Registry)" -InputObject $serverRows -Format Table -Description "Compares Kerberos encryption settings from both registry locations on each farm server: <br/><br/>  - 'HKLM\$PolicyKeyPath' (GPO policy) vs. 'HKLM\$LsaKeyPath' (LSA runtime/effective).<br/><br/> 'Policy = LSA' should be Yes; No or Partial means configured policy and effective state differ."
     $KerberosFindings.ChildFindings.Add($srvFinding)
 
     if ($spnGroups.Count -gt 0)
@@ -7438,7 +7912,7 @@ function Get-SPDiagnosticSearchFindings
         $ssaFindings.ChildFindings.Add((Get-SPDiagnosticsSSASchemaMappings -searchApplication $ssa))
         $ssaFindings.ChildFindings.Add((Get-SPDiagnosticsSSAServerNameMappings -searchApplication $ssa))
         $ssaFindings.ChildFindings.Add((Get-SPDiagnosticsSSACrawlRules -searchApplication $ssa))
-        $ssaFindings.ChildFindings.Add((Get-SPDiagnostictsSSAQueryAuthority -searchApplication $ssa))
+        #$ssaFindings.ChildFindings.Add((Get-SPDiagnostictsSSAQueryAuthority -searchApplication $ssa))
         $ssaFindings.ChildFindings.Add((Get-SPDiagnosticsSSACrawlPolicies -searchApplication $ssa))
         $ssaFindings.ChildFindings.Add((Get-SPDiagnosticsSSAEndpoints -searchApplication $ssa))
         #$ssaFindings.ChildFindings.Add((Get-SPDiagnosticsIndexDiskSpace -searchApplication $SSA))
@@ -7787,17 +8261,20 @@ function Get-MSSCrawlStatHistory
         $searchApplication
     )
 
-    $crawlHistoryFinding = New-DiagnosticFinding -Name "Crawl History Stats (top 500)" -InputObject $null -format table
+    $crawlHistoryFinding = New-DiagnosticFinding -Name "Crawl History Stats (top 200)" -InputObject $null -format table
 
     $crawlStatqueryText = @"
-DECLARE @Count int = 500;
+DECLARE @Count int = 200;
 DECLARE @ContentSourceID int = -1;
 
 SELECT 
     CrawlStats.CrawlID                                                       AS CrawlID,
-    CASE CrawlStats.CrawlID
-        WHEN 1 THEN 8
-        ELSE History.CrawlType
+    CASE (CASE CrawlStats.CrawlID WHEN 1 THEN 8 ELSE History.CrawlType END)
+        WHEN 1 THEN 'Full'
+        WHEN 2 THEN 'Incremental'
+        WHEN 6 THEN 'Delete'
+        WHEN 8 THEN 'Continuous'
+        ELSE 'Unknown'
     END                                                                       AS CrawlType,
     CrawlStats.ContentSourceID                                                AS ContentSourceID,
     CASE CrawlStats.CrawlID
@@ -8298,6 +8775,7 @@ function Get-SPDiagnosticsSSACrawlRules
     return $finding
 }
 
+<#
 function Get-SPDiagnostictsSSAQueryAuthority ($searchApplication)
 {
     #Authoritative and demoted sites
@@ -8349,6 +8827,7 @@ function Get-SPDiagnostictsSSAQueryAuthority ($searchApplication)
     }
 
 }
+#>
 function Get-SPDiagnosticsSSACrawlPolicies
 {
     [CmdletBinding()]
@@ -9237,7 +9716,7 @@ function Get-SPSearchIndexReplicaReport
                 }
 
                 $wmiQuery = "select * from win32_LogicalDisk where DriveType=3 and DeviceID ='" + $indexDrive + "'"
-                $disk = Get-WmiObject -Query $wmiQuery -ComputerName $serverName -ErrorAction SilentlyContinue
+                $disk = Get-SPFICimInstance -ComputerName $serverName -Query $wmiQuery
                 if ($disk -and $disk.FreeSpace) { $freeSpace = [long]$disk.FreeSpace }
             }
         }
@@ -10141,7 +10620,7 @@ function Get-SPDiagnosticsSearchHealthCheck()
 
             foreach ($node in $noderunnerProcesses) {
                 $node | Add-Member -Force -MemberType NoteProperty -Name _ProcessCommandLine -Value $(
-                    (Get-WmiObject Win32_Process -ComputerName $hostname -Filter $("processId=" + $node.id)).CommandLine
+                    (Get-SPFICimInstance -ComputerName $hostname -ClassName Win32_Process -Filter $("processId=" + $node.id)).CommandLine
                 )
 
                 $junoComponents | where-object {$_.Servername -ieq $hostname} | ForEach-Object {
@@ -11856,7 +12335,7 @@ function net46orHigherInstalled ($ServerName)
 
 function getWindowsVersion ($ServerName)
 {
-    $v = [version](Get-WmiObject Win32_OperatingSystem -ComputerName $ServerName -ErrorAction Stop).Version
+    $v = [version](Get-SPFICimInstance -ComputerName $ServerName -ClassName Win32_OperatingSystem -Stop).Version
     switch ($v.Major) {
         6
         {
@@ -12100,305 +12579,421 @@ function Get-SPDiagnosticsTlsFinding
 Function Get-SPDiagnosticsDCacheFinding
 {
     $DCacheFindings = New-DiagnosticFinding -Name "Distributed Cache" -InputObject $null -Format List
+    #Get all Distributed Cache service instances in the farm (from any server, not just the local one)
+    $DCacheInstances = Get-SPServiceInstance | Where-Object {$_.TypeName -match "Cache" -and $_.Status -ne "disabled"}
 
-    #DCache data collection works only on servers that host the Distributed Cache
-    if ( ($Null -eq (get-spserviceInstance | Where-Object{$_.typename -match "Cache" -and $_.Status -ne "disabled" -and $_.Server.Name -eq $env:ComputerName}))  -or (!(IsElevated)))
+    if ($Null -eq $DCacheInstances)
     {
-        $DcacheFindings.Description += 'Data collection for Distributed Cache works only on Servers that host a Distributed Cache Instance and this script is running in a PowerShell session that was started with "Run as Administrator"'
+        $DCacheFindings.Description += 'No Distributed Cache service instances were found in this farm.'
+        return $DCacheFindings
     }
-    else
-    {
-        #Get DCache Servers in SPSE
-        $DCacheServers = (get-spserviceInstance | Where-Object{$_.typename -match "Cache" -and $_.Status -ne "disabled"} | Select-Object server).server.name
 
-        $SPSE = ($Script:Build -eq "SPSE")
+    if (!(IsElevated))
+    {
+        $DCacheFindings.Description += 'Data collection for Distributed Cache requires this script to be running in a PowerShell session that was started with "Run as Administrator".'
+        return $DCacheFindings
+    }
+
+    #All Distributed Cache servers in the farm
+    $DCacheServers = @($DCacheInstances.Server.Name | Select-Object -Unique)
+    $SPSE = ($Script:Build -eq "SPSE")
+
+    #The Distributed Cache cmdlets (SPSE "SPCache*" and the 2013/2016/2019 AppFabric cmdlets) require the
+    #Distributed Cache cluster provider to be registered on the LOCAL machine. That provider only exists on
+    #servers that host the Distributed Cache service, so the cmdlets fail on any other server. To collect the
+    #data regardless of which server the script runs from, the gathering below runs on a cache host - locally
+    #when this server hosts the cache, otherwise remotely (Invoke-Command) against a reachable cache host.
+    $DCacheGatherScriptBlock = {
+        param($DCacheServers, $SPSE, $RemoteSession)
+
+        if ($RemoteSession)
+        {
+            #Loading the SharePoint snap-in establishes the farm context the SP cmdlets need in a remote session.
+            if ($null -eq (Get-PSSnapin -Name Microsoft.SharePoint.PowerShell -ErrorAction SilentlyContinue))
+            {
+                Add-PSSnapin Microsoft.SharePoint.PowerShell -ErrorAction Stop
+            }
+        }
 
         if ($SPSE)
         {
-            #Get DCache Server Config
-            $DCacheHostConfig = $DCacheServers | ForEach-Object { Get-SPCacheHostConfig -HostName $_ }
-
-            #Get DCache Server Status
-            $DCacheHostStatus = $DCacheHostConfig  | ForEach-Object { Get-SPCacheHost -HostName $_.HostName -CachePort $_.CachePort}
-
-            #Cache Names and Host
-            $Caches = Get-SPCache
-
+            #SharePoint Subscription Edition - built-in SPCache* cmdlets (AppFabric was removed in SPSE).
+            $hostConfig = $DCacheServers | ForEach-Object { Get-SPCacheHostConfig -HostName $_ }
+            $hostStatus = $hostConfig | ForEach-Object { Get-SPCacheHost -HostName $_.HostName -CachePort $_.CachePort }
+            $caches = Get-SPCache
         }
         else
         {
+            #SharePoint 2013/2016/2019 - AppFabric-based cmdlets (not available in SPSE).
             Use-CacheCluster
-
-            #Get DCache Server Config
-            $DCacheHostConfig = $DCacheServers | ForEach-Object { Get-CacheHostConfig -HostName $_ -Port 22233 }
-
-            #Get DCache Server Status
-            $DCacheHostStatus = Get-CacheHost
-
-            #Cache Names and Host
-            $Caches = Get-Cache
-
+            $hostConfig = $DCacheServers | ForEach-Object { Get-CacheHostConfig -HostName $_ -Port 22233 }
+            $hostStatus = Get-CacheHost
+            $caches = Get-Cache
         }
 
-        #CacheHost Status
-        $CacheHostStatus = @()
-        foreach ($ch in $DCacheHostStatus)
+        $hostStatusRows = @()
+        foreach ($ch in $hostStatus)
         {
-            $chd = New-Object psobject
-            $chd | add-Member -MemberType NoteProperty -Name "Hostname" -Value $($ch.HostName)
-            $chd | add-Member -MemberType NoteProperty -Name "PortNo" -Value $ch.PortNo
-            $chd | add-Member -MemberType NoteProperty -Name "ServiceName" -Value $ch.ServiceName
-            $chd | add-Member -MemberType NoteProperty -Name "Status" -Value $ch.Status
-            $chd | add-Member -MemberType NoteProperty -Name "VersionInfo" -Value $ch.VersionInfo
-            $CacheHostStatus += $chd
+            $hostStatusRows += [PSCustomObject]@{
+                Hostname    = [string]$ch.HostName
+                PortNo      = $ch.PortNo
+                ServiceName = [string]$ch.ServiceName
+                Status      = [string]$ch.Status
+                VersionInfo = [string]$ch.VersionInfo
+            }
         }
 
-        $DCacheHStatus = New-DiagnosticFinding -Name "  Distributed Cache Host Status" -InputObject $CacheHostStatus -Format Table
+        $hostConfigRows = @()
+        foreach ($hc in $hostConfig)
+        {
+            $hostConfigRows += [PSCustomObject]@{
+                HostName        = [string]$hc.HostName
+                ClusterPort     = $hc.ClusterPort
+                CachePort       = $hc.CachePort
+                ArbitrationPort = $hc.ArbitrationPort
+                ReplicationPort = $hc.ReplicationPort
+                Size            = [long]$hc.Size
+                ServiceName     = [string]$hc.ServiceName
+                HighWatermark   = [long]$hc.HighWatermark
+                LowWatermark    = [long]$hc.LowWatermark
+                IsLeadHost      = [bool]$hc.IsLeadHost
+            }
+        }
+
+        $statsRows = @()
+        foreach ($cache in $caches)
+        {
+            if ($SPSE) { $css = Get-SPCacheStatistics -CacheName $cache.CacheName }
+            else       { $css = Get-CacheStatistics  -CacheName $cache.CacheName }
+
+            $cacheHost = $null
+            if ($cache.HostRegionMap -and @($cache.HostRegionMap.Keys).Count -gt 0) { $cacheHost = [string]@($cache.HostRegionMap.Keys)[0] }
+
+            $statsRows += [PSCustomObject]@{
+                Name              = [string]$cache.CacheName
+                Host              = $cacheHost
+                Size              = [long]$css.Size
+                ItemCount         = [long]$css.ItemCount
+                RegionCount       = $css.RegionCount
+                RequestCount      = [long]$css.RequestCount
+                ReadRequestCount  = [long]$css.ReadRequestCount
+                WriteRequestCount = [long]$css.WriteRequestCount
+                MissCount         = [long]$css.MissCount
+                IncomingBandwidth = [long]$css.IncomingBandwidth
+                OutgoingBandwidth = [long]$css.OutgoingBandwidth
+            }
+        }
+
+        $clientRows = @()
+        $cacheTypes = [enum]::GetNames("Microsoft.SharePoint.DistributedCaching.Utilities.SPDistributedCacheContainerType")
+        foreach ($cache in $caches)
+        {
+            $cacheType = $cache.CacheName.Split("_")[0]
+            if ($cacheTypes -contains $cacheType)
+            {
+                $cacheHost = $null
+                if ($cache.HostRegionMap -and @($cache.HostRegionMap.Keys).Count -gt 0) { $cacheHost = [string]@($cache.HostRegionMap.Keys)[0] }
+
+                foreach ($ccs in (Get-SPDistributedCacheClientSetting -ContainerType $cacheType))
+                {
+                    $clientRows += [PSCustomObject]@{
+                        Name                         = [string]$cacheType
+                        Host                         = $cacheHost
+                        ChannelInitializationTimeout = $ccs.ChannelInitializationTimeout
+                        ConnectionBufferSize         = $ccs.ConnectionBufferSize
+                        MaxBufferPoolSize            = $ccs.MaxBufferPoolSize
+                        MaxBufferSize                = $ccs.MaxBufferSize
+                        MaxOutputDelay               = $ccs.MaxOutputDelay
+                        ReceiveTimeout               = $ccs.ReceiveTimeout
+                        ChannelOpenTimeOut           = $ccs.ChannelOpenTimeOut
+                        RequestTimeout               = $ccs.RequestTimeout
+                        MaxConnectionsToServer       = $ccs.MaxConnectionsToServer
+                    }
+                }
+            }
+        }
+
+        return [PSCustomObject]@{
+            HostStatus     = $hostStatusRows
+            HostConfig     = $hostConfigRows
+            Statistics     = $statsRows
+            ClientSettings = $clientRows
+        }
+    }
+
+    #Decide where to gather from: locally if this server hosts the cache, otherwise remotely via a cache host.
+    $localIsCacheHost = @($DCacheServers | Where-Object { $_ -eq $env:COMPUTERNAME }).Count -gt 0
+    $DCacheData = $null
+    $CollectedRemotely = $false
+    $RemoteHostUsed = $null
+    $CollectionError = $null
+
+    if ($localIsCacheHost)
+    {
+        try { $DCacheData = & $DCacheGatherScriptBlock -DCacheServers $DCacheServers -SPSE $SPSE -RemoteSession $false }
+        catch { $CollectionError = $_.Exception.Message }
+    }
+    else
+    {
+        foreach ($candidate in $DCacheServers)
+        {
+            if ($candidate -eq $env:COMPUTERNAME) { continue }
+            try
+            {
+                $null = Test-WSMan -ComputerName $candidate -ErrorAction Stop
+                $DCacheData = Invoke-Command -ComputerName $candidate -ErrorAction Stop -ScriptBlock $DCacheGatherScriptBlock -ArgumentList $DCacheServers, $SPSE, $true
+                $CollectedRemotely = $true
+                $RemoteHostUsed = $candidate
+                break
+            }
+            catch
+            {
+                $CollectionError = $_.Exception.Message
+            }
+        }
+    }
+
+    if ($null -ne $DCacheData)
+    {
+        if ($CollectedRemotely)
+        {
+            $DCacheFindings.Description += "This server ($($env:COMPUTERNAME)) does not host Distributed Cache; detailed data was collected remotely from cache host '$RemoteHostUsed'."
+        }
+
+        #Distributed Cache Host Status
+        $DCacheHStatus = New-DiagnosticFinding -Name "  Distributed Cache Host Status" -InputObject @($DCacheData.HostStatus) -Format Table
         $DCacheFindings.ChildFindings.Add(($DCacheHStatus))
-        if($Performance)
+
+        #Distributed Cache Host Configuration
+        $script:TotalDCacheReserved = 0
+        $CacheHostConfig = @()
+        foreach ($hc in $DCacheData.HostConfig)
         {
-        $script:TotalDCacheReserved=0
-        #CacheHost Configuration
-        $CacheHostConfig= @()
-        foreach($dchs in $DCacheHostConfig)
-        {
-            $chs = new-Object PSObject
-            $chs | Add-Member -MemberType NoteProperty -Name "HostName" -Value $($dchs.HostName)
-            $chs | Add-Member -MemberType NoteProperty -Name "ClusterPort" -Value $dchs.ClusterPort
-            $chs | Add-Member -MemberType NoteProperty -Name "CachePort" -Value $dchs.CachePort
-            $chs | Add-Member -MemberType NoteProperty -Name "ArbitrationPort" -Value $dchs.ArbitrationPort
-            $chs | Add-Member -MemberType NoteProperty -Name "ReplicationPort" -Value $dchs.ReplicationPort
-            $chs | Add-Member -MemberType NoteProperty -Name "Size" -Value $dchs.Size.ToString('N0')
-            $chs | Add-Member -MemberType NoteProperty -Name "ServiceName" -Value $dchs.ServiceName
-            $chs | Add-Member -MemberType NoteProperty -Name "HighWatermark" -Value $dchs.HighWatermark.ToString('N0')
-            $chs | Add-Member -MemberType NoteProperty -Name "LowWatermark" -Value $dchs.LowWatermark.ToString('N0')
-            $chs | Add-Member -MemberType NoteProperty -Name "IsLeadHost" -Value $dchs.IsLeadHost
-            $CacheHostConfig += $chs
-            $script:TotalDCacheReserved +=$dchs.Size
+            $CacheHostConfig += [PSCustomObject]@{
+                HostName        = $hc.HostName
+                ClusterPort     = $hc.ClusterPort
+                CachePort       = $hc.CachePort
+                ArbitrationPort = $hc.ArbitrationPort
+                ReplicationPort = $hc.ReplicationPort
+                Size            = ([long]$hc.Size).ToString('N0')
+                ServiceName     = $hc.ServiceName
+                HighWatermark   = ([long]$hc.HighWatermark).ToString('N0')
+                LowWatermark    = ([long]$hc.LowWatermark).ToString('N0')
+                IsLeadHost      = $hc.IsLeadHost
+            }
+            $script:TotalDCacheReserved += [long]$hc.Size
         }
         $DCacheHConfig = New-DiagnosticFinding -Name "  Distributed Cache Host Configuration" -InputObject $CacheHostConfig -Format Table
-        if(IsElevated)
+
+        #Evaluate each host's configured size: 16 GB per-host cap, and against that host's own physical memory.
+        #Memory is read per host (remotely) so the check is correct no matter which server the script runs from.
+        $DCacheSizeTooLargeHosts = @()
+        $DCacheSizeTooSmallHosts = @()
+        $DCacheSizeOverCapHosts = @()
+        foreach ($hc in $DCacheData.HostConfig)
         {
+            if ([long]$hc.Size -gt 16384) { $DCacheSizeOverCapHosts += $hc.HostName }
+
             $InstalledMem = 0
-            (((get-WmiObject Win32_PhysicalMemory) | ForEach-Object { $InstalledMem += $_.Capacity}))
-            $InstalledMem = $InstalledMem / 1MB
-            
-            if ($dchs.size -gt (($InstalledMem - 2048) / 2))
+            try
             {
-                $DCacheHConfig.WarningMessage = "Distributed Cache size is too large on server" 
-                $DCacheHConfig.Severity = [SPDiagnostics.Severity]::Warning
+                Get-CimInstance -ComputerName $hc.HostName -ClassName Win32_PhysicalMemory -ErrorAction Stop | ForEach-Object { $InstalledMem += $_.Capacity }
+                $InstalledMem = $InstalledMem / 1MB
             }
-            if ($dchs.size -lt (($InstalledMem -2048) / 10))
+            catch
             {
-                $DCacheHConfig.description += "Distributed Cache  size could be too small on server" 
-                $DCacheHConfig.Severity = [SPDiagnostics.Severity]::Informational
+                #Could not read physical memory on this host (WinRM/DCOM unavailable); skip the memory-based checks for it.
+                $InstalledMem = 0
             }
-            if ($DCacheHConfig.WarningMessage.Count -gt 0)                          
+
+            if ($InstalledMem -gt 0)
             {
-                $DCacheHConfig.ReferenceLink = [uri]"https://learn.microsoft.com/en-us/sharepoint/administration/manage-the-distributed-cache-service?tabs=SCS1%2CSCS2%2CSCS3%2CSCS%2CSCS4#change-the-memory-allocation-of-the-distributed-cache-service"
-                $DCacheHConfig.ReferenceLink = [uri]"https://learn.microsoft.com/en-us/sharepoint/administration/plan-for-feeds-and-the-distributed-cache-service"
-                #$DCacheHConfig.Severity = [SPDiagnostics.Severity]::Warning
+                if ([long]$hc.Size -gt (($InstalledMem - 2048) / 2))  { $DCacheSizeTooLargeHosts += $hc.HostName }
+                if ([long]$hc.Size -lt (($InstalledMem - 2048) / 10)) { $DCacheSizeTooSmallHosts += $hc.HostName }
             }
-        }    
+        }
+
+        $DCacheSizeRefLinkNeeded = $false
+        if ($DCacheSizeOverCapHosts.Count -gt 0)
+        {
+            $DCacheHConfig.WarningMessage += "Distributed Cache size exceeds the recommended maximum of 16 GB per host on the following server(s): " + ($DCacheSizeOverCapHosts -join ', ')
+            $DCacheHConfig.Severity = [SPDiagnostics.Severity]::Warning
+            $DCacheSizeRefLinkNeeded = $true
+        }
+        if ($DCacheSizeTooLargeHosts.Count -gt 0)
+        {
+            $DCacheHConfig.WarningMessage += "Distributed Cache size may be too large (more than half of available memory) on the following server(s): " + ($DCacheSizeTooLargeHosts -join ', ')
+            $DCacheHConfig.Severity = [SPDiagnostics.Severity]::Warning
+            $DCacheSizeRefLinkNeeded = $true
+        }
+        if ($DCacheSizeTooSmallHosts.Count -gt 0)
+        {
+            $DCacheHConfig.Description += "Distributed Cache size may be too small on the following server(s): " + ($DCacheSizeTooSmallHosts -join ', ')
+            $DCacheHConfig.Severity = [SPDiagnostics.Severity]::Informational
+        }
+        if ($DCacheSizeRefLinkNeeded)
+        {
+            $DCacheHConfig.ReferenceLink += "https://learn.microsoft.com/en-us/sharepoint/administration/manage-the-distributed-cache-service"
+        }
         $DCacheHConfig.Description += "Total memory reserved on all Distributed Cache Hosts: $(($script:TotalDCacheReserved *1MB).ToString('N0')) Bytes"
         $DCacheFindings.ChildFindings.Add(($DCacheHConfig))
 
-
         #Individual Cache Statistics
-        $DCacheStatitistics = @()
         $DCacheStatisticsFindings = New-DiagnosticFinding -Name "  Distributed Cache Statistics" -InputObject $Null -Format Table
-        if (!(IsElevated))
+        $script:TotalDCacheBytes = 0
+        $DCacheStatitistics = @()
+        foreach ($st in $DCacheData.Statistics)
         {
-            $DCacheStatisticsFindings.Description += "Distributed Cache Statistics can only be executed when the script is running executed with 'Run as Administrator'."
-
-        } else {
-
-            #foreach ($CacheContainerType in [enum]::GetNames("Microsoft.SharePoint.DistributedCaching.Utilities.SPDistributedCacheContainerType"))
-            $script:TotalDCacheBytes=0
-            $failedCacheStatistics=0
-            foreach ($Cache in $Caches)
-            {
-                $css = $null
-                try
-                {
-                    if ($SPSE)
-                    {
-                        $css = Get-SPCacheStatistics -CacheName $cache.CacheName -ErrorAction Stop
-                    } else {
-                        $css = Get-CacheStatistics -CacheName $cache.CacheName -ErrorAction Stop
-                    }
-                    if ($null -eq $css)
-                    {
-                        throw "No statistics were returned."
-                    }
-                    $missingCounters = @(
-                        'Size', 'ItemCount', 'RegionCount', 'RequestCount',
-                        'ReadRequestCount', 'WriteRequestCount', 'MissCount',
-                        'IncomingBandwidth', 'OutgoingBandwidth'
-                    ) | Where-Object { $null -eq $css.$_ }
-                    if ($missingCounters)
-                    {
-                        throw "Statistics did not include required values: $($missingCounters -join ', ')."
-                    }
-                }
-                catch
-                {
-                    $message = "Could not collect Distributed Cache statistics for '$($cache.CacheName)': $($_.Exception.Message)"
-                    Write-Warning $message
-                    $DCacheStatisticsFindings.WarningMessage += $message
-                    $DCacheStatisticsFindings.Severity = [SPDiagnostics.Severity]::Warning
-                    $failedCacheStatistics++
-                    continue
-                }
-                $cs = New-Object PSObject 
-                $cs | Add-Member -MemberType NoteProperty -Name "Name" -value $cache.CacheName
-                $cs | Add-Member -MemberType NoteProperty -Name "Host" -value $($($cache.HostRegionMap.Keys[0]))
-                $cs | Add-Member -MemberType NoteProperty -Name "Size" -value $css.Size.ToString('N0')
-                $cs | Add-Member -MemberType NoteProperty -Name "ItemCount" -value $css.ItemCount.ToString('N0')
-                $cs | Add-Member -MemberType NoteProperty -Name "RegionCount" -value $css.RegionCount
-                $cs | Add-Member -MemberType NoteProperty -Name "RequestCount" -value $css.RequestCount.ToString('N0')
-                $cs | Add-Member -MemberType NoteProperty -Name "ReadRequestCount" -value $css.ReadRequestCount.ToString('N0')
-                $cs | Add-Member -MemberType NoteProperty -Name "WriteRequestCount" -value $css.WriteRequestCount.ToString('N0')
-                $cs | Add-Member -MemberType NoteProperty -Name "MissCount" -value $css.MissCount.ToString('N0')
-                $cs | Add-Member -MemberType NoteProperty -Name "IncomingBandwidth" -value $css.IncomingBandwidth.ToString('N0')
-                $cs | Add-Member -MemberType NoteProperty -Name "OutgoingBandwidth" -value  $css.OutgoingBandwidth.ToString('N0')
-                $DCacheStatitistics += $cs
-                $script:TotalDCacheBytes += $css.Size
+            $DCacheStatitistics += [PSCustomObject]@{
+                Name              = $st.Name
+                Host              = $st.Host
+                Size              = ([long]$st.Size).ToString('N0')
+                ItemCount         = ([long]$st.ItemCount).ToString('N0')
+                RegionCount       = $st.RegionCount
+                RequestCount      = ([long]$st.RequestCount).ToString('N0')
+                ReadRequestCount  = ([long]$st.ReadRequestCount).ToString('N0')
+                WriteRequestCount = ([long]$st.WriteRequestCount).ToString('N0')
+                MissCount         = ([long]$st.MissCount).ToString('N0')
+                IncomingBandwidth = ([long]$st.IncomingBandwidth).ToString('N0')
+                OutgoingBandwidth = ([long]$st.OutgoingBandwidth).ToString('N0')
             }
-            $DCacheStatisticsFindings.InputObject = $DCacheStatitistics 
-            if ($failedCacheStatistics -eq 0)
-            {
-                $DCacheStatisticsFindings.Description +="Total Memory used for all cached data: $($script:TotalDCacheBytes.ToString('N0')) Bytes."
-            }
-            elseif ($DCacheStatitistics.Count -gt 0)
-            {
-                $DCacheStatisticsFindings.Description += "Partial results: memory used by $($DCacheStatitistics.Count) caches with available statistics: $($script:TotalDCacheBytes.ToString('N0')) Bytes. Statistics for $failedCacheStatistics caches could not be collected; total memory used for all cached data is unavailable."
-            }
-            else
-            {
-                $DCacheStatisticsFindings.Description += "Statistics for all $failedCacheStatistics queried caches could not be collected; total memory used for all cached data is unavailable."
-            }
+            $script:TotalDCacheBytes += [long]$st.Size
         }
+        $DCacheStatisticsFindings.InputObject = $DCacheStatitistics
+        $DCacheStatisticsFindings.Description += "Total Memory used for all cached data: $($script:TotalDCacheBytes.ToString('N0')) Bytes."
         $DCacheFindings.ChildFindings.Add(($DCacheStatisticsFindings))
 
         #Distributed Cache Client Settings
-        $RequestTimeoutToLow =@()
-        $ChannelOpenTimeoutToLow=@()
-        $MaxConnectionsToServerToHigh=@()
-
-        $DCacheClientSettingsFindings = New-DiagnosticFinding -Name "  Distributed Cache Client Settings" -InputObject $DCacheClientSettings -Format Table
-        $DCacheClientSettings=@()
-        foreach ($Cache in $Caches)
+        $RequestTimeoutToLow = @()
+        $ChannelOpenTimeoutToLow = @()
+        $MaxConnectionsToServerToHigh = @()
+        foreach ($cs in $DCacheData.ClientSettings)
         {
-            $CacheType = $Cache.CacheName.Split("_")[0]
-            $CacheTypes = [enum]::GetNames("Microsoft.SharePoint.DistributedCaching.Utilities.SPDistributedCacheContainerType")
-            if ($CacheTypes -contains $CacheType)
-            {
-                if ($SPSE)
-                {
-                    $CacheClientSettings = Get-SPDistributedCacheClientSetting -ContainerType $CacheType
-                } else {
-                    $CacheClientSettings = Get-SPDistributedCacheClientSetting -ContainerType $CacheType
-                }
-
-                foreach ($ccs in $CacheClientSettings)
-                {
-                    $cc = New-Object PSObject
-                    $cc | Add-Member -MemberType NoteProperty -Name "Name" -Value $CacheType
-                    $cc | Add-Member -MemberType NoteProperty -Name "Host" -value $($($cache.HostRegionMap.Keys[0]))
-                    $cc | Add-Member -MemberType NoteProperty -Name "ChannelInitializationTimeout" -Value $ccs.ChannelInitializationTimeout
-                    $cc | Add-Member -MemberType NoteProperty -Name "ConnectionBufferSize" -Value $ccs.ConnectionBufferSize
-                    $cc | Add-Member -MemberType NoteProperty -Name "MaxBufferPoolSize" -Value $ccs.MaxBufferPoolSize
-                    $cc | Add-Member -MemberType NoteProperty -Name "MaxBufferSize" -Value $ccs.MaxBufferSize
-                    $cc | Add-Member -MemberType NoteProperty -Name "MaxOutputDelay" -Value $ccs.MaxOutputDelay
-                    $cc | Add-Member -MemberType NoteProperty -Name "ReceiveTimeout" -Value $ccs.ReceiveTimeout
-                    $cc | Add-Member -MemberType NoteProperty -Name "ChannelOpenTimeOut" -Value $ccs.ChannelOpenTimeOut
-                    $cc | Add-Member -MemberType NoteProperty -Name "RequestTimeout" -Value $ccs.RequestTimeout
-                    $cc | Add-Member -MemberType NoteProperty -Name "MaxConnectionsToServer" -Value $ccs.MaxConnectionsToServer
-
-                    if ($ccs.RequestTimeout -lt 3000)
-                    {
-                        #$DCacheClientSettingsFindings.WarningMessage +="$($CacheType): The RequestTimeout could be set too low" 
-                        $RequestTimeoutToLow += $CacheType
-                    }
-
-                    if ($ccs.ChannelOpenTimeOut -lt 3000)
-                    {
-                        #$DCacheClientSettingsFindings.WarningMessage +="$($CacheType): The ChannelOpenTimeout could be set too low" 
-                        $ChannelOpenTimeoutToLow += $CacheType
-                    }
-
-                    if ($ccs.MaxConnectionsToServer -gt 1)
-                    {
-                        #$DCacheClientSettingsFindings.WarningMessage +="$($CacheType): Too many parallel client connections allowed to server" 
-                        $MaxConnectionsToServerToHigh += $CacheType
-                    }
-                    $DCacheClientSettings += $cc
-                }
-            } # else { write-host "unknown Cache Type $CacheType" }
+            if ($cs.RequestTimeout -lt 3000)       { $RequestTimeoutToLow += $cs.Name }
+            if ($cs.ChannelOpenTimeOut -lt 3000)   { $ChannelOpenTimeoutToLow += $cs.Name }
+            if ($cs.MaxConnectionsToServer -gt 1)  { $MaxConnectionsToServerToHigh += $cs.Name }
         }
 
-        if ( $RequestTimeoutToLow.Count -gt 0)
+        $DCacheClientSettingsFindings = New-DiagnosticFinding -Name "  Distributed Cache Client Settings" -InputObject @($DCacheData.ClientSettings) -Format Table
+        if ($RequestTimeoutToLow.Count -gt 0)
         {
-            $DCacheClientSettingsFindings.WarningMessage +="The RequestTimeout could be set too low for the following Cache Types: " + $($RequestTimeoutToLow -join (', '))
-            $DCacheClientSettingsFindings.Severity =[SPDiagnostics.Severity]::Informational 
+            $DCacheClientSettingsFindings.WarningMessage += "The RequestTimeout could be set too low for the following Cache Types: " + ($RequestTimeoutToLow -join ', ')
+            $DCacheClientSettingsFindings.Severity = [SPDiagnostics.Severity]::Informational
             $DCacheClientSettingsFindings.WarningMessage += "<BR>"
         }
-
-        if ( $ChannelOpenTimeoutToLow.Count -gt 0)
+        if ($ChannelOpenTimeoutToLow.Count -gt 0)
         {
-            $DCacheClientSettingsFindings.WarningMessage +="The ChannelOpenTimeout could be set too low for the following Cache Types: " + $($ChannelOpenTimeoutToLow -join (', '))
-            $DCacheClientSettingsFindings.Severity =[SPDiagnostics.Severity]::Informational 
+            $DCacheClientSettingsFindings.WarningMessage += "The ChannelOpenTimeout could be set too low for the following Cache Types: " + ($ChannelOpenTimeoutToLow -join ', ')
+            $DCacheClientSettingsFindings.Severity = [SPDiagnostics.Severity]::Informational
             $DCacheClientSettingsFindings.WarningMessage += "<BR>"
         }
-
-        if ( $MaxConnectionsToServerToHigh.Count -gt 0)
+        if ($MaxConnectionsToServerToHigh.Count -gt 0)
         {
-            $DCacheClientSettingsFindings.WarningMessage +="Too many parallel client connections allowed to server for the following Cache Types: " + $($MaxConnectionsToServerToHigh -join (', '))
-            $DCacheClientSettingsFindings.Severity =[SPDiagnostics.Severity]::Informational 
+            $DCacheClientSettingsFindings.WarningMessage += "Too many parallel client connections allowed to server for the following Cache Types: " + ($MaxConnectionsToServerToHigh -join ', ')
+            $DCacheClientSettingsFindings.Severity = [SPDiagnostics.Severity]::Informational
             $DCacheClientSettingsFindings.WarningMessage += "<BR>"
         }
-
-        if ($DCacheClientSettingsFindings.WarningMessage.Count -gt 0)                          
+        if ($DCacheClientSettingsFindings.WarningMessage.Count -gt 0)
         {
-            $DCacheClientSettingsFindings.ReferenceLink = [uri]"https://learn.microsoft.com/en-us/sharepoint/administration/manage-the-distributed-cache-service?tabs=SCS1%2CSCS2%2CSCS3%2CSCS%2CSCS4#fine-tune-the-distributed-cache-service-by-using-a-powershell-script"
+            $DCacheClientSettingsFindings.ReferenceLink += "https://learn.microsoft.com/en-us/sharepoint/administration/manage-the-distributed-cache-service?tabs=SCS1%2CSCS2%2CSCS3%2CSCS%2CSCS4#fine-tune-the-distributed-cache-service-by-using-a-powershell-script"
             $DCacheClientSettingsFindings.Severity = [SPDiagnostics.Severity]::Informational
         }
-
-        $DCacheClientSettingsFindings.InputObject=$DCacheClientSettings 
-        foreach($settingsRecord in $DCacheClientSettings)
+        if($null -ne $script:SPFarm)
         {
-            Add-DiagnosticCommandSnapshot -Finding $DCacheClientSettingsFindings -CommandName 'Get-SPDistributedCacheClientSetting' -Records $settingsRecord -Scope ([ordered]@{ farmId = $script:SPFarm.Id; containerType = $settingsRecord.Name }) -Source 'Get-SPDistributedCacheClientSetting -ContainerType (existing collector)' -Coverage 'Farm/container-type client settings inspected by the optional DistributedCache/Performance collector. Host is an optional display observation, may be null, and does not identify a per-host configuration query.' -IdentityProperties @('Name')
+            foreach($settingsRecord in @($DCacheData.ClientSettings))
+            {
+                Add-DiagnosticCommandSnapshot -Finding $DCacheClientSettingsFindings -CommandName 'Get-SPDistributedCacheClientSetting' -Records $settingsRecord -Scope ([ordered]@{ farmId = $script:SPFarm.Id; containerType = $settingsRecord.Name }) -Source 'Get-SPDistributedCacheClientSetting -ContainerType (existing collector)' -Coverage 'Farm/container-type client settings inspected by the optional DistributedCache/Performance collector. Host is an optional display observation, may be null, and does not identify a per-host configuration query.' -IdentityProperties @('Name')
+            }
         }
         $DCacheFindings.ChildFindings.Add(($DCacheClientSettingsFindings))
-
-        #Ping Test for all DCache Ports
-        $DCacheNetworkPortTestFindings = New-DiagnosticFinding -Name "Distributed Cache Network Port Test" -InputObject $null -Format Table
-        
-        $DCacheClusterPortTests=@()
-        foreach ($DCacheHost in $DCacheHostConfig)
+    }
+    else
+    {
+        #Detailed data could not be collected. Report clearly and still surface what IS available from this server.
+        if ($localIsCacheHost)
         {
-            $ptCluster = Test-NetConnection -ComputerName $DCacheHost.HostName -Port $DCacheHost.ClusterPort
-            $ptCache = Test-NetConnection -ComputerName $DCacheHost.HostName -Port $DCacheHost.CachePort
-            if ($DCacheServers.Count -gt 1) {$ptArbitration =Test-NetConnection -ComputerName $DCacheHost.HostName -Port $DCacheHost.ArbitrationPort}
-            $ptRepl = Test-NetConnection -ComputerName $DCacheHost.HostName -Port $DCacheHost.ReplicationPort
-
-            $DCacheClusterPortTest = new-Object PSObject
-            $DCacheClusterPortTest | Add-Member -MemberType NoteProperty -Name "Client" -Value $($env:COMPUTERNAME)
-            $DCacheClusterPortTest | Add-Member -MemberType NoteProperty -Name "Distributed Cache Server" -Value $($DCacheHost.HostName)
-            $DCacheClusterPortTest | Add-Member -MemberType NoteProperty -Name "SourceIP" -Value $($ptCluster.SourceAddress.IPAddress)
-            $DCacheClusterPortTest | Add-Member -MemberType NoteProperty -Name "RemoteIP" -Value $($ptCluster.RemoteAddress.IPAddressToString)
-            $DCacheClusterPortTest | Add-Member -MemberType NoteProperty -Name "Cache Port 22233" -Value $ptCache.TcpTestSucceeded
-            $DCacheClusterPortTest | Add-Member -MemberType NoteProperty -Name "Cluster Port 22234" -Value $ptCluster.TcpTestSucceeded
-            if ($DCacheServers.Count -eq 1) { $DCacheClusterPortTest | Add-Member -MemberType NoteProperty -Name "Arbitration Port 22235" -Value "not tested - Single Server Cluster"}
-            else { $DCacheClusterPortTest | Add-Member -MemberType NoteProperty -Name "Arbitration Port 22235" -Value $ptArbitration.TCPTestSucceeded }
-            $DCacheClusterPortTest | Add-Member -MemberType NoteProperty -Name "Replication Port 22236" -Value $ptRepl.TcpTestSucceeded
-            $DCacheClusterPortTests +=$DCacheClusterPortTest
+            $DCacheFindings.WarningMessage += "Distributed Cache data collection failed on this cache host ($($env:COMPUTERNAME))."
         }
-        $DCacheNetworkPortTestFindings.InputObject =$DCacheClusterPortTests 
-        $DCacheFindings.ChildFindings.Add(($DCacheNetworkPortTestFindings))
+        else
+        {
+            $DCacheFindings.WarningMessage += "Detailed Distributed Cache configuration and statistics could not be collected from '$($env:COMPUTERNAME)' because it does not host the Distributed Cache service, and remote collection from a cache host was not successful. Run the script from a Distributed Cache host, or enable PowerShell remoting with credential delegation (for example CredSSP) to one of: $($DCacheServers -join ', '). The service instance status and network port tests below were still collected from this server."
+        }
+        if ($CollectionError)
+        {
+            $DCacheFindings.Description += "Last collection error: $CollectionError"
+        }
+        $DCacheFindings.Severity = [SPDiagnostics.Severity]::Warning
+        $DCacheFindings.ReferenceLink += "https://learn.microsoft.com/en-us/sharepoint/administration/manage-the-distributed-cache-service"
+
+        #Service instance status is available farm-wide without the local cache provider.
+        $InstanceRows = @()
+        foreach ($inst in $DCacheInstances)
+        {
+            $InstanceRows += [PSCustomObject]@{
+                Server  = [string]$inst.Server.Name
+                Service = [string]$inst.TypeName
+                Status  = [string]$inst.Status
+            }
+        }
+        $DCacheInstFinding = New-DiagnosticFinding -Name "  Distributed Cache Service Instances" -InputObject $InstanceRows -Format Table
+        $DCacheFindings.ChildFindings.Add(($DCacheInstFinding))
     }
+
+    #Network port test - always run from THIS server to each cache host (useful from any server).
+    #Uses collected per-host ports when available, otherwise the SPSE/AppFabric default ports.
+    $PortTargets = @()
+    if ($null -ne $DCacheData -and $DCacheData.HostConfig)
+    {
+        foreach ($hc in $DCacheData.HostConfig)
+        {
+            $PortTargets += [PSCustomObject]@{
+                HostName        = $hc.HostName
+                ClusterPort     = $hc.ClusterPort
+                CachePort       = $hc.CachePort
+                ArbitrationPort = $hc.ArbitrationPort
+                ReplicationPort = $hc.ReplicationPort
+            }
+        }
     }
+    else
+    {
+        foreach ($srv in $DCacheServers)
+        {
+            $PortTargets += [PSCustomObject]@{
+                HostName        = $srv
+                ClusterPort     = 22234
+                CachePort       = 22233
+                ArbitrationPort = 22235
+                ReplicationPort = 22236
+            }
+        }
+    }
+
+    $DCacheNetworkPortTestFindings = New-DiagnosticFinding -Name "Distributed Cache Network Port Test" -InputObject $null -Format Table
+    $DCacheClusterPortTests = @()
+    foreach ($DCacheHost in $PortTargets)
+    {
+        $ptCluster = Test-NetConnection -ComputerName $DCacheHost.HostName -Port $DCacheHost.ClusterPort -WarningAction SilentlyContinue
+        $ptCache   = Test-NetConnection -ComputerName $DCacheHost.HostName -Port $DCacheHost.CachePort -WarningAction SilentlyContinue
+        if ($DCacheServers.Count -gt 1) { $ptArbitration = Test-NetConnection -ComputerName $DCacheHost.HostName -Port $DCacheHost.ArbitrationPort -WarningAction SilentlyContinue }
+        $ptRepl    = Test-NetConnection -ComputerName $DCacheHost.HostName -Port $DCacheHost.ReplicationPort -WarningAction SilentlyContinue
+
+        $DCacheClusterPortTest = [PSCustomObject]@{
+            "Client"                   = $env:COMPUTERNAME
+            "Distributed Cache Server" = $DCacheHost.HostName
+            "SourceIP"                 = $ptCluster.SourceAddress.IPAddress
+            "RemoteIP"                 = $ptCluster.RemoteAddress.IPAddressToString
+            "Cache Port 22233"         = $ptCache.TcpTestSucceeded
+            "Cluster Port 22234"       = $ptCluster.TcpTestSucceeded
+        }
+        if ($DCacheServers.Count -eq 1) { $DCacheClusterPortTest | Add-Member -MemberType NoteProperty -Name "Arbitration Port 22235" -Value "not tested - Single Server Cluster" }
+        else { $DCacheClusterPortTest | Add-Member -MemberType NoteProperty -Name "Arbitration Port 22235" -Value $ptArbitration.TcpTestSucceeded }
+        $DCacheClusterPortTest | Add-Member -MemberType NoteProperty -Name "Replication Port 22236" -Value $ptRepl.TcpTestSucceeded
+        $DCacheClusterPortTests += $DCacheClusterPortTest
+    }
+    $DCacheNetworkPortTestFindings.InputObject = $DCacheClusterPortTests
+    $DCacheFindings.ChildFindings.Add(($DCacheNetworkPortTestFindings))
+
     return $DCacheFindings
 }
 #endregion #DistributedCache
