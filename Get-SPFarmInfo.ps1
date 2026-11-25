@@ -114,9 +114,6 @@ param(
     [Parameter(Position=90,HelpMessage="Performs additional Performance related checks and report server resources. Some items which may have been with the default SPFarmInfo Script run have been moved here.")]
     [switch]$Performance,
 
-    [Parameter(Position=100,HelpMessage="Collects configuration and status information regarding distributed cache")]
-    [switch]$DistributedCache,
-
     #Task 602: Removing ExtendedFindings switch
     #[Parameter(Position=108,HelpMessage="Includes addition detailed findings about the environment that are not included by default")]
     #[switch]$ExtendedFindings,
@@ -3230,6 +3227,7 @@ function Get-SPDiagnosticServersInFarm
     $finding.ChildFindings.Add((Get-ServerLocalGroupMemberships))
     $finding.ChildFindings.Add((Get-UserRightsAssignments))
     $finding.ChildFindings.Add((Get-HDDiskStatistics))
+    $finding.ChildFindings.Add((Get-SPDiagnosticsOfficeAndSearchKeys -Servers ($servers | Where-Object {$_.Role -ne "Invalid"})))
     #Task 528: Move SQL Alias finding to SQL servers
     #Reverted: SQL Alias finding moved back under "Servers in Farm"
     $sqlAliasFinding = Get-SPDiagnosticsSqlAlias
@@ -3646,9 +3644,34 @@ function Get-HDDiskStatistics
     $ServerHarddDisks = New-DiagnosticFinding -Name "Disk Usage on Servers" -InputObject $null -Format Table
     $DiskUsageInfos=@()
     $servers = $script:servers | Where-Object {$_.role -ne "Invalid"}
+    $localHostNames = Get-SPFILocalHostNameSet
     foreach ($server in $servers)
     {
-        $ServerDiskInfos = get-wmiObject -query "select * from win32_LogicalDisk where DriveType=3" -ComputerName $Server.Name
+        try
+        {
+            if (Test-SPFITargetIsLocal -ComputerName $server.Name -LocalHostNames $localHostNames)
+            {
+                $ServerDiskInfos = Get-WmiObject -Query "select * from win32_LogicalDisk where DriveType=3" -ErrorAction Stop
+            }
+            else
+            {
+                $ServerDiskInfos = Get-WmiObject -Query "select * from win32_LogicalDisk where DriveType=3" -ComputerName $server.Name -ErrorAction Stop
+            }
+        }
+        catch
+        {
+            $ServerHarddDisks.Severity = [SPDiagnostics.Severity]::Warning
+            $ServerHarddDisks.WarningMessage += "Unable to collect disk usage from server '$($server.Name)': $($_.Exception.Message)"
+
+            $sdiError = New-Object PSObject
+            $sdiError | Add-Member -MemberType NoteProperty -Name "Computer" -Value $($server.Name)
+            $sdiError | Add-Member -MemberType NoteProperty -Name "Disks (Drive - Volume - Free / Size / Used GB)" -Value "(error)"
+            $sdiError | Add-Member -MemberType NoteProperty -Name "Total Size (GB)" -Value $null
+            $sdiError | Add-Member -MemberType NoteProperty -Name "Total Free (GB)" -Value $null
+            $sdiError | Add-Member -MemberType NoteProperty -Name "Total Used (GB)" -Value $null
+            $DiskUsageInfos += $sdiError
+            continue
+        }
 
         # Collect each drive as a single line and accumulate per-server totals so all disks for a server land on one row
         $driveLines = @()
@@ -3695,6 +3718,120 @@ function Get-HDDiskStatistics
     }
     $ServerHarddDisks.InputObject = $DiskUsageInfos
     return $ServerHarddDisks
+}
+
+function Get-SPFILocalHostNameSet
+{
+    $localHostNames = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
+    foreach($name in @('localhost','127.0.0.1','::1',$env:COMPUTERNAME))
+    {
+        if(-not [string]::IsNullOrWhiteSpace($name)) { [void]$localHostNames.Add($name.Trim()) }
+    }
+
+    try
+    {
+        $hostEntry = [System.Net.Dns]::GetHostEntry($env:COMPUTERNAME)
+        if($hostEntry)
+        {
+            if($hostEntry.HostName) { [void]$localHostNames.Add($hostEntry.HostName) }
+            foreach($alias in @($hostEntry.Aliases))
+            {
+                if(-not [string]::IsNullOrWhiteSpace($alias)) { [void]$localHostNames.Add($alias.Trim()) }
+            }
+        }
+    }
+    catch {}
+
+    if($script:servers)
+    {
+        $localServerRows = @($script:servers | Where-Object {
+            $_.Name -ieq $env:COMPUTERNAME -or
+            $_.DisplayName -ieq $env:COMPUTERNAME -or
+            $_.Address -ieq $env:COMPUTERNAME
+        })
+        foreach($localRow in $localServerRows)
+        {
+            foreach($n in @($localRow.Name, $localRow.DisplayName, $localRow.Address))
+            {
+                if(-not [string]::IsNullOrWhiteSpace($n)) { [void]$localHostNames.Add(([string]$n).Trim()) }
+            }
+        }
+    }
+
+    return $localHostNames
+}
+
+function Test-SPFITargetIsLocal
+{
+    param(
+        [string]$ComputerName,
+        [System.Collections.Generic.HashSet[string]]$LocalHostNames
+    )
+
+    if([string]::IsNullOrWhiteSpace($ComputerName)) { return $false }
+    return $LocalHostNames.Contains($ComputerName.Trim())
+}
+
+function Get-SPDiagnosticsOfficeAndSearchKeys
+{
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true)]
+        [Object[]]
+        $Servers
+    )
+
+    $finding = New-DiagnosticFinding -Name "Office and Search RegKeys" -Severity Default -InputObject $null -Format Table
+    $finding.Description += "- These values, 'InstallDirectory' and 'DataDirectory' represent where the 'Microsoft Office Servers' and 'Search Data' were set at Install time.<br/>- This is useful especially for search related data, to know where Constellation\Application folders reside for when we need to look at things or clean up data"
+    $regPath = "HKLM:\SOFTWARE\Microsoft\Office Server\16.0\Search\Setup"
+    $serverNames = @($Servers | ForEach-Object { $_.Name } | Where-Object { ![string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
+    $localHostNames = Get-SPFILocalHostNameSet
+
+    $results = @()
+    foreach($serverName in $serverNames)
+    {
+        try
+        {
+            $regScriptBlock = {
+                $installDir = (Get-ItemProperty "hklm:SOFTWARE\Microsoft\Office Server\16.0\Search\Setup" | Select-Object -Property InstallDirectory).InstallDirectory
+                $dataDir = (Get-ItemProperty "hklm:SOFTWARE\Microsoft\Office Server\16.0\Search\Setup" | Select-Object -Property DataDirectory).DataDirectory
+                [PSCustomObject]@{
+                    InstallDirectory = $installDir
+                    DataDirectory = $dataDir
+                }
+            }
+
+            if (Test-SPFITargetIsLocal -ComputerName $serverName -LocalHostNames $localHostNames)
+            {
+                $regValues = & $regScriptBlock
+            }
+            else
+            {
+                $regValues = Invoke-Command -ComputerName $serverName -ErrorAction Stop -ScriptBlock $regScriptBlock
+            }
+
+            $results += [PSCustomObject]@{
+                Server = $serverName
+                InstallDirectory = $regValues.InstallDirectory
+                DataDirectory = $regValues.DataDirectory
+                Error = $null
+            }
+        }
+        catch
+        {
+            $finding.Severity = [SPDiagnostics.Severity]::Warning
+            $finding.WarningMessage += "Failed to read '$regPath' on server '$serverName'."
+            $results += [PSCustomObject]@{
+                Server = $serverName
+                InstallDirectory = $null
+                DataDirectory = $null
+                Error = $_.Exception.Message
+            }
+        }
+    }
+
+    $finding.InputObject = $results
+    return $finding
 }
 
 function Get-ServerLocalGroupMemberships
@@ -3851,10 +3988,22 @@ function Get-UserRightsAssignments
         finally { Remove-Item $tempFile -ErrorAction SilentlyContinue }
     }
 
+    $localHostNames = Get-SPFILocalHostNameSet
+
     # Run across all servers
     $results = foreach ($server in $servers)
     {
-        Invoke-Command -ComputerName $server.Address -ScriptBlock $scriptBlock -ArgumentList $RightDisplayMap
+        $target = [string]$server.Address
+        if([string]::IsNullOrWhiteSpace($target)) { $target = [string]$server.Name }
+
+        if (Test-SPFITargetIsLocal -ComputerName $target -LocalHostNames $localHostNames)
+        {
+            & $scriptBlock $RightDisplayMap
+        }
+        else
+        {
+            Invoke-Command -ComputerName $target -ScriptBlock $scriptBlock -ArgumentList $RightDisplayMap -ErrorAction Stop
+        }
     }
 
     # Consolidate to a single row per server. All policies for a server are stacked in one cell, joined with the
@@ -5609,9 +5758,17 @@ function Get-SPWebAppApplicationPool ($webapp)
         }
     }
 
+    $localHostNames = Get-SPFILocalHostNameSet
     # Collect IIS settings from each server
     $iisResults = foreach ($server in $servers) {
-        Invoke-Command -ComputerName $server -ScriptBlock $scriptBlock -ArgumentList $webapp.ApplicationPool.Name
+        if (Test-SPFITargetIsLocal -ComputerName $server -LocalHostNames $localHostNames)
+        {
+            & $scriptBlock $webapp.ApplicationPool.Name
+        }
+        else
+        {
+            Invoke-Command -ComputerName $server -ScriptBlock $scriptBlock -ArgumentList $webapp.ApplicationPool.Name -ErrorAction Stop
+        }
     }
 
     # Create a subÃ¢â‚¬â€˜finding for IIS settings
@@ -5859,13 +6016,14 @@ function Get-SPDiagnosticsExtraBindingsOnIIS ($webapp, $zone)
         return $rows
     }
 
+    $localHostNames = Get-SPFILocalHostNameSet
     $allRows = @()
     $serversWithoutSite = @()
     foreach ($server in $servers)
     {
         try
         {
-            if ($server -eq $env:COMPUTERNAME)
+            if (Test-SPFITargetIsLocal -ComputerName $server -LocalHostNames $localHostNames)
             {
                 $res = & $bindingScriptBlock -SiteName $siteName
             }
@@ -7898,8 +8056,6 @@ function Get-SPDiagnosticSearchFindings
         #    $ssaFindings.ChildFindings.Add((Get-SPDiagnosticsSearchHealthCheck -searchApplication $ssa))
         #} 
         $ssaFindings.ChildFindings.Add((Get-SPDiagnosticsSearchHealthCheck -searchApplication $ssa))
-
-
         $ssaFindings.ChildFindings.Add((Get-SPDiagnosticsSSAObject -searchApplication $ssa))
         $ssaFindings.ChildFindings.Add((Get-SPDiagnosticsSSAProxyPartition -searchApplication $ssa))
         $ssaFindings.ChildFindings.Add((Get-SPDiagnosticsSSATimerJobs -searchapplication $ssa))
@@ -12578,423 +12734,155 @@ function Get-SPDiagnosticsTlsFinding
 #region DistributedCache
 Function Get-SPDiagnosticsDCacheFinding
 {
-    $DCacheFindings = New-DiagnosticFinding -Name "Distributed Cache" -InputObject $null -Format List
-    #Get all Distributed Cache service instances in the farm (from any server, not just the local one)
-    $DCacheInstances = Get-SPServiceInstance | Where-Object {$_.TypeName -match "Cache" -and $_.Status -ne "disabled"}
+    $finding = New-DiagnosticFinding -Name "Distributed Cache" -InputObject $null -Format Table
+    $cachePort = 22233
 
-    if ($Null -eq $DCacheInstances)
+    $cacheInstances = @(Get-SPServiceInstance | Where-Object { $_.TypeName -match "Cache" -and $_.Status -ne "Disabled" })
+    if ($cacheInstances.Count -eq 0)
     {
-        $DCacheFindings.Description += 'No Distributed Cache service instances were found in this farm.'
-        return $DCacheFindings
+        $finding.Description += "No Distributed Cache service instances were found in this farm."
+        return $finding
     }
 
-    if (!(IsElevated))
+    $instanceStatuses = @($cacheInstances | Select-Object @{N='Server';E={$_.Server.Address}}, TypeName, Status, Id)
+    $nonOnlineInstances = @($instanceStatuses | Where-Object { [string]$_.Status -ne "Online" })
+    if ($nonOnlineInstances.Count -gt 0)
     {
-        $DCacheFindings.Description += 'Data collection for Distributed Cache requires this script to be running in a PowerShell session that was started with "Run as Administrator".'
-        return $DCacheFindings
+        $finding.Severity = [SPDiagnostics.Severity]::Warning
+        $finding.WarningMessage += "One or more Distributed Cache service instances are not Online."
+        $finding.ChildFindings.Add((New-DiagnosticFinding -Name "Distributed Cache Service Instances" -InputObject $instanceStatuses -Format Table))
     }
 
-    #All Distributed Cache servers in the farm
-    $DCacheServers = @($DCacheInstances.Server.Name | Select-Object -Unique)
-    $SPSE = ($Script:Build -eq "SPSE")
+    $cacheServers = @(
+        $cacheInstances |
+            ForEach-Object { if($_.Server.Address){ $_.Server.Address } else { $_.Server.Name } } |
+            Where-Object { ![string]::IsNullOrWhiteSpace($_) } |
+            Sort-Object -Unique
+    )
 
-    #The Distributed Cache cmdlets (SPSE "SPCache*" and the 2013/2016/2019 AppFabric cmdlets) require the
-    #Distributed Cache cluster provider to be registered on the LOCAL machine. That provider only exists on
-    #servers that host the Distributed Cache service, so the cmdlets fail on any other server. To collect the
-    #data regardless of which server the script runs from, the gathering below runs on a cache host - locally
-    #when this server hosts the cache, otherwise remotely (Invoke-Command) against a reachable cache host.
-    $DCacheGatherScriptBlock = {
-        param($DCacheServers, $SPSE, $RemoteSession)
-
-        if ($RemoteSession)
+    $isSPSE = ($Script:Build -eq "SPSE")
+    $results = @()
+    if ($isSPSE)
+    {
+        foreach($server in $cacheServers)
         {
-            #Loading the SharePoint snap-in establishes the farm context the SP cmdlets need in a remote session.
-            if ($null -eq (Get-PSSnapin -Name Microsoft.SharePoint.PowerShell -ErrorAction SilentlyContinue))
+            try
             {
-                Add-PSSnapin Microsoft.SharePoint.PowerShell -ErrorAction Stop
-            }
-        }
-
-        if ($SPSE)
-        {
-            #SharePoint Subscription Edition - built-in SPCache* cmdlets (AppFabric was removed in SPSE).
-            $hostConfig = $DCacheServers | ForEach-Object { Get-SPCacheHostConfig -HostName $_ }
-            $hostStatus = $hostConfig | ForEach-Object { Get-SPCacheHost -HostName $_.HostName -CachePort $_.CachePort }
-            $caches = Get-SPCache
-        }
-        else
-        {
-            #SharePoint 2013/2016/2019 - AppFabric-based cmdlets (not available in SPSE).
-            Use-CacheCluster
-            $hostConfig = $DCacheServers | ForEach-Object { Get-CacheHostConfig -HostName $_ -Port 22233 }
-            $hostStatus = Get-CacheHost
-            $caches = Get-Cache
-        }
-
-        $hostStatusRows = @()
-        foreach ($ch in $hostStatus)
-        {
-            $hostStatusRows += [PSCustomObject]@{
-                Hostname    = [string]$ch.HostName
-                PortNo      = $ch.PortNo
-                ServiceName = [string]$ch.ServiceName
-                Status      = [string]$ch.Status
-                VersionInfo = [string]$ch.VersionInfo
-            }
-        }
-
-        $hostConfigRows = @()
-        foreach ($hc in $hostConfig)
-        {
-            $hostConfigRows += [PSCustomObject]@{
-                HostName        = [string]$hc.HostName
-                ClusterPort     = $hc.ClusterPort
-                CachePort       = $hc.CachePort
-                ArbitrationPort = $hc.ArbitrationPort
-                ReplicationPort = $hc.ReplicationPort
-                Size            = [long]$hc.Size
-                ServiceName     = [string]$hc.ServiceName
-                HighWatermark   = [long]$hc.HighWatermark
-                LowWatermark    = [long]$hc.LowWatermark
-                IsLeadHost      = [bool]$hc.IsLeadHost
-            }
-        }
-
-        $statsRows = @()
-        foreach ($cache in $caches)
-        {
-            if ($SPSE) { $css = Get-SPCacheStatistics -CacheName $cache.CacheName }
-            else       { $css = Get-CacheStatistics  -CacheName $cache.CacheName }
-
-            $cacheHost = $null
-            if ($cache.HostRegionMap -and @($cache.HostRegionMap.Keys).Count -gt 0) { $cacheHost = [string]@($cache.HostRegionMap.Keys)[0] }
-
-            $statsRows += [PSCustomObject]@{
-                Name              = [string]$cache.CacheName
-                Host              = $cacheHost
-                Size              = [long]$css.Size
-                ItemCount         = [long]$css.ItemCount
-                RegionCount       = $css.RegionCount
-                RequestCount      = [long]$css.RequestCount
-                ReadRequestCount  = [long]$css.ReadRequestCount
-                WriteRequestCount = [long]$css.WriteRequestCount
-                MissCount         = [long]$css.MissCount
-                IncomingBandwidth = [long]$css.IncomingBandwidth
-                OutgoingBandwidth = [long]$css.OutgoingBandwidth
-            }
-        }
-
-        $clientRows = @()
-        $cacheTypes = [enum]::GetNames("Microsoft.SharePoint.DistributedCaching.Utilities.SPDistributedCacheContainerType")
-        foreach ($cache in $caches)
-        {
-            $cacheType = $cache.CacheName.Split("_")[0]
-            if ($cacheTypes -contains $cacheType)
-            {
-                $cacheHost = $null
-                if ($cache.HostRegionMap -and @($cache.HostRegionMap.Keys).Count -gt 0) { $cacheHost = [string]@($cache.HostRegionMap.Keys)[0] }
-
-                foreach ($ccs in (Get-SPDistributedCacheClientSetting -ContainerType $cacheType))
+                $hosts = @(Get-SPCacheHost -HostName $server -CachePort $cachePort -ErrorAction Stop)
+                foreach ($h in $hosts)
                 {
-                    $clientRows += [PSCustomObject]@{
-                        Name                         = [string]$cacheType
-                        Host                         = $cacheHost
-                        ChannelInitializationTimeout = $ccs.ChannelInitializationTimeout
-                        ConnectionBufferSize         = $ccs.ConnectionBufferSize
-                        MaxBufferPoolSize            = $ccs.MaxBufferPoolSize
-                        MaxBufferSize                = $ccs.MaxBufferSize
-                        MaxOutputDelay               = $ccs.MaxOutputDelay
-                        ReceiveTimeout               = $ccs.ReceiveTimeout
-                        ChannelOpenTimeOut           = $ccs.ChannelOpenTimeOut
-                        RequestTimeout               = $ccs.RequestTimeout
-                        MaxConnectionsToServer       = $ccs.MaxConnectionsToServer
+                    $results += [pscustomobject]@{
+                        "HostName : CachePort" = "$($h.HostName):$($h.PortNo)"
+                        "Service Name"         = $h.ServiceName
+                        "Service Status"       = $h.Status
+                        "Version Info"         = $h.VersionInfo
                     }
                 }
             }
-        }
-
-        return [PSCustomObject]@{
-            HostStatus     = $hostStatusRows
-            HostConfig     = $hostConfigRows
-            Statistics     = $statsRows
-            ClientSettings = $clientRows
-        }
-    }
-
-    #Decide where to gather from: locally if this server hosts the cache, otherwise remotely via a cache host.
-    $localIsCacheHost = @($DCacheServers | Where-Object { $_ -eq $env:COMPUTERNAME }).Count -gt 0
-    $DCacheData = $null
-    $CollectedRemotely = $false
-    $RemoteHostUsed = $null
-    $CollectionError = $null
-
-    if ($localIsCacheHost)
-    {
-        try { $DCacheData = & $DCacheGatherScriptBlock -DCacheServers $DCacheServers -SPSE $SPSE -RemoteSession $false }
-        catch { $CollectionError = $_.Exception.Message }
-    }
-    else
-    {
-        foreach ($candidate in $DCacheServers)
-        {
-            if ($candidate -eq $env:COMPUTERNAME) { continue }
-            try
-            {
-                $null = Test-WSMan -ComputerName $candidate -ErrorAction Stop
-                $DCacheData = Invoke-Command -ComputerName $candidate -ErrorAction Stop -ScriptBlock $DCacheGatherScriptBlock -ArgumentList $DCacheServers, $SPSE, $true
-                $CollectedRemotely = $true
-                $RemoteHostUsed = $candidate
-                break
-            }
             catch
             {
-                $CollectionError = $_.Exception.Message
-            }
-        }
-    }
-
-    if ($null -ne $DCacheData)
-    {
-        if ($CollectedRemotely)
-        {
-            $DCacheFindings.Description += "This server ($($env:COMPUTERNAME)) does not host Distributed Cache; detailed data was collected remotely from cache host '$RemoteHostUsed'."
-        }
-
-        #Distributed Cache Host Status
-        $DCacheHStatus = New-DiagnosticFinding -Name "  Distributed Cache Host Status" -InputObject @($DCacheData.HostStatus) -Format Table
-        $DCacheFindings.ChildFindings.Add(($DCacheHStatus))
-
-        #Distributed Cache Host Configuration
-        $script:TotalDCacheReserved = 0
-        $CacheHostConfig = @()
-        foreach ($hc in $DCacheData.HostConfig)
-        {
-            $CacheHostConfig += [PSCustomObject]@{
-                HostName        = $hc.HostName
-                ClusterPort     = $hc.ClusterPort
-                CachePort       = $hc.CachePort
-                ArbitrationPort = $hc.ArbitrationPort
-                ReplicationPort = $hc.ReplicationPort
-                Size            = ([long]$hc.Size).ToString('N0')
-                ServiceName     = $hc.ServiceName
-                HighWatermark   = ([long]$hc.HighWatermark).ToString('N0')
-                LowWatermark    = ([long]$hc.LowWatermark).ToString('N0')
-                IsLeadHost      = $hc.IsLeadHost
-            }
-            $script:TotalDCacheReserved += [long]$hc.Size
-        }
-        $DCacheHConfig = New-DiagnosticFinding -Name "  Distributed Cache Host Configuration" -InputObject $CacheHostConfig -Format Table
-
-        #Evaluate each host's configured size: 16 GB per-host cap, and against that host's own physical memory.
-        #Memory is read per host (remotely) so the check is correct no matter which server the script runs from.
-        $DCacheSizeTooLargeHosts = @()
-        $DCacheSizeTooSmallHosts = @()
-        $DCacheSizeOverCapHosts = @()
-        foreach ($hc in $DCacheData.HostConfig)
-        {
-            if ([long]$hc.Size -gt 16384) { $DCacheSizeOverCapHosts += $hc.HostName }
-
-            $InstalledMem = 0
-            try
-            {
-                Get-CimInstance -ComputerName $hc.HostName -ClassName Win32_PhysicalMemory -ErrorAction Stop | ForEach-Object { $InstalledMem += $_.Capacity }
-                $InstalledMem = $InstalledMem / 1MB
-            }
-            catch
-            {
-                #Could not read physical memory on this host (WinRM/DCOM unavailable); skip the memory-based checks for it.
-                $InstalledMem = 0
-            }
-
-            if ($InstalledMem -gt 0)
-            {
-                if ([long]$hc.Size -gt (($InstalledMem - 2048) / 2))  { $DCacheSizeTooLargeHosts += $hc.HostName }
-                if ([long]$hc.Size -lt (($InstalledMem - 2048) / 10)) { $DCacheSizeTooSmallHosts += $hc.HostName }
-            }
-        }
-
-        $DCacheSizeRefLinkNeeded = $false
-        if ($DCacheSizeOverCapHosts.Count -gt 0)
-        {
-            $DCacheHConfig.WarningMessage += "Distributed Cache size exceeds the recommended maximum of 16 GB per host on the following server(s): " + ($DCacheSizeOverCapHosts -join ', ')
-            $DCacheHConfig.Severity = [SPDiagnostics.Severity]::Warning
-            $DCacheSizeRefLinkNeeded = $true
-        }
-        if ($DCacheSizeTooLargeHosts.Count -gt 0)
-        {
-            $DCacheHConfig.WarningMessage += "Distributed Cache size may be too large (more than half of available memory) on the following server(s): " + ($DCacheSizeTooLargeHosts -join ', ')
-            $DCacheHConfig.Severity = [SPDiagnostics.Severity]::Warning
-            $DCacheSizeRefLinkNeeded = $true
-        }
-        if ($DCacheSizeTooSmallHosts.Count -gt 0)
-        {
-            $DCacheHConfig.Description += "Distributed Cache size may be too small on the following server(s): " + ($DCacheSizeTooSmallHosts -join ', ')
-            $DCacheHConfig.Severity = [SPDiagnostics.Severity]::Informational
-        }
-        if ($DCacheSizeRefLinkNeeded)
-        {
-            $DCacheHConfig.ReferenceLink += "https://learn.microsoft.com/en-us/sharepoint/administration/manage-the-distributed-cache-service"
-        }
-        $DCacheHConfig.Description += "Total memory reserved on all Distributed Cache Hosts: $(($script:TotalDCacheReserved *1MB).ToString('N0')) Bytes"
-        $DCacheFindings.ChildFindings.Add(($DCacheHConfig))
-
-        #Individual Cache Statistics
-        $DCacheStatisticsFindings = New-DiagnosticFinding -Name "  Distributed Cache Statistics" -InputObject $Null -Format Table
-        $script:TotalDCacheBytes = 0
-        $DCacheStatitistics = @()
-        foreach ($st in $DCacheData.Statistics)
-        {
-            $DCacheStatitistics += [PSCustomObject]@{
-                Name              = $st.Name
-                Host              = $st.Host
-                Size              = ([long]$st.Size).ToString('N0')
-                ItemCount         = ([long]$st.ItemCount).ToString('N0')
-                RegionCount       = $st.RegionCount
-                RequestCount      = ([long]$st.RequestCount).ToString('N0')
-                ReadRequestCount  = ([long]$st.ReadRequestCount).ToString('N0')
-                WriteRequestCount = ([long]$st.WriteRequestCount).ToString('N0')
-                MissCount         = ([long]$st.MissCount).ToString('N0')
-                IncomingBandwidth = ([long]$st.IncomingBandwidth).ToString('N0')
-                OutgoingBandwidth = ([long]$st.OutgoingBandwidth).ToString('N0')
-            }
-            $script:TotalDCacheBytes += [long]$st.Size
-        }
-        $DCacheStatisticsFindings.InputObject = $DCacheStatitistics
-        $DCacheStatisticsFindings.Description += "Total Memory used for all cached data: $($script:TotalDCacheBytes.ToString('N0')) Bytes."
-        $DCacheFindings.ChildFindings.Add(($DCacheStatisticsFindings))
-
-        #Distributed Cache Client Settings
-        $RequestTimeoutToLow = @()
-        $ChannelOpenTimeoutToLow = @()
-        $MaxConnectionsToServerToHigh = @()
-        foreach ($cs in $DCacheData.ClientSettings)
-        {
-            if ($cs.RequestTimeout -lt 3000)       { $RequestTimeoutToLow += $cs.Name }
-            if ($cs.ChannelOpenTimeOut -lt 3000)   { $ChannelOpenTimeoutToLow += $cs.Name }
-            if ($cs.MaxConnectionsToServer -gt 1)  { $MaxConnectionsToServerToHigh += $cs.Name }
-        }
-
-        $DCacheClientSettingsFindings = New-DiagnosticFinding -Name "  Distributed Cache Client Settings" -InputObject @($DCacheData.ClientSettings) -Format Table
-        if ($RequestTimeoutToLow.Count -gt 0)
-        {
-            $DCacheClientSettingsFindings.WarningMessage += "The RequestTimeout could be set too low for the following Cache Types: " + ($RequestTimeoutToLow -join ', ')
-            $DCacheClientSettingsFindings.Severity = [SPDiagnostics.Severity]::Informational
-            $DCacheClientSettingsFindings.WarningMessage += "<BR>"
-        }
-        if ($ChannelOpenTimeoutToLow.Count -gt 0)
-        {
-            $DCacheClientSettingsFindings.WarningMessage += "The ChannelOpenTimeout could be set too low for the following Cache Types: " + ($ChannelOpenTimeoutToLow -join ', ')
-            $DCacheClientSettingsFindings.Severity = [SPDiagnostics.Severity]::Informational
-            $DCacheClientSettingsFindings.WarningMessage += "<BR>"
-        }
-        if ($MaxConnectionsToServerToHigh.Count -gt 0)
-        {
-            $DCacheClientSettingsFindings.WarningMessage += "Too many parallel client connections allowed to server for the following Cache Types: " + ($MaxConnectionsToServerToHigh -join ', ')
-            $DCacheClientSettingsFindings.Severity = [SPDiagnostics.Severity]::Informational
-            $DCacheClientSettingsFindings.WarningMessage += "<BR>"
-        }
-        if ($DCacheClientSettingsFindings.WarningMessage.Count -gt 0)
-        {
-            $DCacheClientSettingsFindings.ReferenceLink += "https://learn.microsoft.com/en-us/sharepoint/administration/manage-the-distributed-cache-service?tabs=SCS1%2CSCS2%2CSCS3%2CSCS%2CSCS4#fine-tune-the-distributed-cache-service-by-using-a-powershell-script"
-            $DCacheClientSettingsFindings.Severity = [SPDiagnostics.Severity]::Informational
-        }
-        if($null -ne $script:SPFarm)
-        {
-            foreach($settingsRecord in @($DCacheData.ClientSettings))
-            {
-                Add-DiagnosticCommandSnapshot -Finding $DCacheClientSettingsFindings -CommandName 'Get-SPDistributedCacheClientSetting' -Records $settingsRecord -Scope ([ordered]@{ farmId = $script:SPFarm.Id; containerType = $settingsRecord.Name }) -Source 'Get-SPDistributedCacheClientSetting -ContainerType (existing collector)' -Coverage 'Farm/container-type client settings inspected by the optional DistributedCache/Performance collector. Host is an optional display observation, may be null, and does not identify a per-host configuration query.' -IdentityProperties @('Name')
-            }
-        }
-        $DCacheFindings.ChildFindings.Add(($DCacheClientSettingsFindings))
-    }
-    else
-    {
-        #Detailed data could not be collected. Report clearly and still surface what IS available from this server.
-        if ($localIsCacheHost)
-        {
-            $DCacheFindings.WarningMessage += "Distributed Cache data collection failed on this cache host ($($env:COMPUTERNAME))."
-        }
-        else
-        {
-            $DCacheFindings.WarningMessage += "Detailed Distributed Cache configuration and statistics could not be collected from '$($env:COMPUTERNAME)' because it does not host the Distributed Cache service, and remote collection from a cache host was not successful. Run the script from a Distributed Cache host, or enable PowerShell remoting with credential delegation (for example CredSSP) to one of: $($DCacheServers -join ', '). The service instance status and network port tests below were still collected from this server."
-        }
-        if ($CollectionError)
-        {
-            $DCacheFindings.Description += "Last collection error: $CollectionError"
-        }
-        $DCacheFindings.Severity = [SPDiagnostics.Severity]::Warning
-        $DCacheFindings.ReferenceLink += "https://learn.microsoft.com/en-us/sharepoint/administration/manage-the-distributed-cache-service"
-
-        #Service instance status is available farm-wide without the local cache provider.
-        $InstanceRows = @()
-        foreach ($inst in $DCacheInstances)
-        {
-            $InstanceRows += [PSCustomObject]@{
-                Server  = [string]$inst.Server.Name
-                Service = [string]$inst.TypeName
-                Status  = [string]$inst.Status
-            }
-        }
-        $DCacheInstFinding = New-DiagnosticFinding -Name "  Distributed Cache Service Instances" -InputObject $InstanceRows -Format Table
-        $DCacheFindings.ChildFindings.Add(($DCacheInstFinding))
-    }
-
-    #Network port test - always run from THIS server to each cache host (useful from any server).
-    #Uses collected per-host ports when available, otherwise the SPSE/AppFabric default ports.
-    $PortTargets = @()
-    if ($null -ne $DCacheData -and $DCacheData.HostConfig)
-    {
-        foreach ($hc in $DCacheData.HostConfig)
-        {
-            $PortTargets += [PSCustomObject]@{
-                HostName        = $hc.HostName
-                ClusterPort     = $hc.ClusterPort
-                CachePort       = $hc.CachePort
-                ArbitrationPort = $hc.ArbitrationPort
-                ReplicationPort = $hc.ReplicationPort
+                $finding.Severity = [SPDiagnostics.Severity]::Warning
+                $finding.WarningMessage += "Failed to query cache host '${server}:$cachePort'."
+                $results += [pscustomobject]@{
+                    "HostName : CachePort" = "${server}:$cachePort"
+                    "Service Name"         = "SPCache"
+                    "Service Status"       = "ERROR: $($_.Exception.Message)"
+                    "Version Info"         = $null
+                }
             }
         }
     }
     else
     {
-        foreach ($srv in $DCacheServers)
+        # SharePoint 2016/2019 use AppFabric cache cmdlets.
+        try
         {
-            $PortTargets += [PSCustomObject]@{
-                HostName        = $srv
-                ClusterPort     = 22234
-                CachePort       = 22233
-                ArbitrationPort = 22235
-                ReplicationPort = 22236
+            Use-CacheCluster -ErrorAction Stop
+            $allHosts = @(Get-CacheHost -ErrorAction Stop)
+            foreach($h in $allHosts)
+            {
+                $results += [pscustomobject]@{
+                    "HostName : CachePort" = "$($h.HostName):$($h.PortNo)"
+                    "Service Name"         = $h.ServiceName
+                    "Service Status"       = $h.Status
+                    "Version Info"         = $h.VersionInfo
+                }
+            }
+        }
+        catch
+        {
+            $finding.Severity = [SPDiagnostics.Severity]::Warning
+            $finding.WarningMessage += "Failed to query AppFabric cache hosts: $($_.Exception.Message)"
+            foreach($server in $cacheServers)
+            {
+                $results += [pscustomobject]@{
+                    "HostName : CachePort" = "${server}:$cachePort"
+                    "Service Name"         = "AppFabricCachingService"
+                    "Service Status"       = "ERROR: $($_.Exception.Message)"
+                    "Version Info"         = $null
+                }
             }
         }
     }
 
-    $DCacheNetworkPortTestFindings = New-DiagnosticFinding -Name "Distributed Cache Network Port Test" -InputObject $null -Format Table
-    $DCacheClusterPortTests = @()
-    foreach ($DCacheHost in $PortTargets)
-    {
-        $ptCluster = Test-NetConnection -ComputerName $DCacheHost.HostName -Port $DCacheHost.ClusterPort -WarningAction SilentlyContinue
-        $ptCache   = Test-NetConnection -ComputerName $DCacheHost.HostName -Port $DCacheHost.CachePort -WarningAction SilentlyContinue
-        if ($DCacheServers.Count -gt 1) { $ptArbitration = Test-NetConnection -ComputerName $DCacheHost.HostName -Port $DCacheHost.ArbitrationPort -WarningAction SilentlyContinue }
-        $ptRepl    = Test-NetConnection -ComputerName $DCacheHost.HostName -Port $DCacheHost.ReplicationPort -WarningAction SilentlyContinue
+    $finding.InputObject = $results
 
-        $DCacheClusterPortTest = [PSCustomObject]@{
-            "Client"                   = $env:COMPUTERNAME
-            "Distributed Cache Server" = $DCacheHost.HostName
-            "SourceIP"                 = $ptCluster.SourceAddress.IPAddress
-            "RemoteIP"                 = $ptCluster.RemoteAddress.IPAddressToString
-            "Cache Port 22233"         = $ptCache.TcpTestSucceeded
-            "Cluster Port 22234"       = $ptCluster.TcpTestSucceeded
+    $badHostStatuses = @(
+        $results | Where-Object {
+            [string]$_."Service Status" -like "ERROR:*" -or
+            ([string]$_."Service Status").ToLowerInvariant() -notin @("up", "online")
         }
-        if ($DCacheServers.Count -eq 1) { $DCacheClusterPortTest | Add-Member -MemberType NoteProperty -Name "Arbitration Port 22235" -Value "not tested - Single Server Cluster" }
-        else { $DCacheClusterPortTest | Add-Member -MemberType NoteProperty -Name "Arbitration Port 22235" -Value $ptArbitration.TcpTestSucceeded }
-        $DCacheClusterPortTest | Add-Member -MemberType NoteProperty -Name "Replication Port 22236" -Value $ptRepl.TcpTestSucceeded
-        $DCacheClusterPortTests += $DCacheClusterPortTest
+    )
+    if ($badHostStatuses.Count -gt 0)
+    {
+        $finding.Severity = [SPDiagnostics.Severity]::Warning
+        $finding.WarningMessage += "One or more Distributed Cache hosts are not Up/Online."
     }
-    $DCacheNetworkPortTestFindings.InputObject = $DCacheClusterPortTests
-    $DCacheFindings.ChildFindings.Add(($DCacheNetworkPortTestFindings))
 
-    return $DCacheFindings
+    try
+    {
+        $clientSettings = @()
+        $cacheTypes = [enum]::GetNames("Microsoft.SharePoint.DistributedCaching.Utilities.SPDistributedCacheContainerType")
+        foreach($cacheType in $cacheTypes)
+        {
+            foreach($setting in @(Get-SPDistributedCacheClientSetting -ContainerType $cacheType -ErrorAction SilentlyContinue))
+            {
+                $clientSettings += [PSCustomObject]@{
+                    CacheType              = $cacheType
+                    RequestTimeout         = if($setting.PSObject.Properties.Match('RequestTimeout').Count -gt 0) { $setting.RequestTimeout } else { $null }
+                    ChannelOpenTimeOut     = if($setting.PSObject.Properties.Match('ChannelOpenTimeOut').Count -gt 0) { $setting.ChannelOpenTimeOut } else { $null }
+                    MaxConnectionsToServer = if($setting.PSObject.Properties.Match('MaxConnectionsToServer').Count -gt 0) { $setting.MaxConnectionsToServer } else { $null }
+                }
+            }
+        }
+        if ($clientSettings.Count -gt 0)
+        {
+            $settingsRows = @()
+            foreach($s in $clientSettings | Sort-Object CacheType -Unique)
+            {
+                $settingsRows += [PSCustomObject]@{
+                    CacheType                           = $s.CacheType
+                    RequestTimeout                      = $s.RequestTimeout
+                    RequestTimeoutThresholdMs           = 3000
+                    ChannelOpenTimeOut                  = $s.ChannelOpenTimeOut
+                    ChannelOpenTimeOutThresholdMs       = 3000
+                    MaxConnectionsToServer              = $s.MaxConnectionsToServer
+                    MaxConnectionsToServerThresholdMax  = 1
+                }
+            }
+
+            $settingsFinding = New-DiagnosticFinding -Name "Distributed Cache Client Settings and Thresholds" -InputObject $settingsRows -Format Table
+            $settingsFinding.Description += "This table reports current client settings and reference thresholds for review. Threshold values are shown for visibility only and are not auto-flagged as errors."
+            $settingsFinding.ReferenceLink += "https://learn.microsoft.com/en-us/sharepoint/administration/manage-the-distributed-cache-service?tabs=SCS1%2CSCS2%2CSCS3%2CSCS%2CSCS4#fine-tune-the-distributed-cache-service-by-using-a-powershell-script"
+            $finding.ChildFindings.Add($settingsFinding)
+        }
+    }
+    catch
+    {
+        $finding.Description += "Distributed Cache client settings were not evaluated: $($_.Exception.Message)"
+    }
+
+    return $finding
 }
 #endregion #DistributedCache
 
@@ -14086,8 +13974,10 @@ function Show-ScriptParameterMenu {
         [Hashtable]$MenuItems
     )
 
+    if($SkipParameterMenu){ return }
+
     # If ISE is used we will want to display the numbered menu
-    [bool]$hostIsISE = $SkipParameterMenu -or $host.Name -like "Windows PowerShell ISE Host"
+    [bool]$hostIsISE = $host.Name -like "Windows PowerShell ISE Host"
 
     $selectedIndex = 0
 
@@ -14204,8 +14094,8 @@ function Show-ScriptParameterMenu {
 
 function Write-ScriptParametersMenu($parameters)
 {
-    # Don't use if SkipParmeterMenu is used or this is not runing under PowerShell
-    #if($SkipParameterMenu -or $host.Name -like "Windows PowerShell ISE Host"){return}
+    # Skip interactive collector menu when explicitly requested.
+    if($SkipParameterMenu){ return }
 
     # Create a new hashtable that will be used for just switch based parameters
     $switchParameters = @{}
@@ -14352,10 +14242,7 @@ function main
     #    $rootFindingCollection.Add((Get-SPDiagnosticSearchFindings))
     #}   
 
-    if($DistributedCache -or $Performance)
-    {
-        $rootFindingCollection.Add((Get-SPDiagnosticsDCacheFinding))
-    }
+    $rootFindingCollection.Add((Get-SPDiagnosticsDCacheFinding))
 
     if($TLS)
     {
