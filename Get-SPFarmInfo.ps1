@@ -137,7 +137,7 @@ if([System.IntPtr]::Size -lt 8)
     exit
 }
 
-$ScriptVersion="4.3.2611.1100"
+$ScriptVersion="4.3.2611.2500"
 $script:PreviousFindingTime= Get-Date
 
 # Retrieve parameters information
@@ -7569,10 +7569,166 @@ Function Get-KerberosEncTypeLabel($Value)
     return ("{0} (0x{1:X})" -f $label, $v)
 }
 
+Function Get-SPFISqlDataSourceParts
+{
+    param(
+        [string]$DataSource
+    )
+
+    $rawValue = [string]$DataSource
+    $workingValue = $rawValue.Trim()
+    if ([string]::IsNullOrWhiteSpace($workingValue))
+    {
+        return [PSCustomObject]@{
+            Original = $rawValue
+            Host = $null
+            Instance = $null
+            Port = $null
+            HostShort = $null
+        }
+    }
+
+    if ($workingValue -match '^[A-Za-z]+:')
+    {
+        $workingValue = $workingValue.Substring($workingValue.IndexOf(':') + 1)
+    }
+
+    $port = $null
+    $portSplit = $workingValue.Split(',', 2)
+    if ($portSplit.Count -gt 1)
+    {
+        $workingValue = $portSplit[0]
+        $port = $portSplit[1].Trim()
+    }
+
+    $sqlHost = $workingValue.Trim()
+    $instance = $null
+    $instanceSplit = $sqlHost.Split('\', 2)
+    if ($instanceSplit.Count -gt 1)
+    {
+        $sqlHost = $instanceSplit[0].Trim()
+        $instance = $instanceSplit[1].Trim()
+    }
+
+    $hostShort = $sqlHost
+    if ($hostShort -match '\.')
+    {
+        $hostShort = $hostShort.Split('.')[0]
+    }
+
+    return [PSCustomObject]@{
+        Original = $rawValue
+        Host = $sqlHost
+        Instance = $instance
+        Port = $port
+        HostShort = $hostShort
+    }
+}
+
+Function Get-SPFIAdSpnsBySamAccountName
+{
+    param(
+        [string]$SamAccountName
+    )
+
+    $spns = @()
+    $exists = $false
+    if ([string]::IsNullOrWhiteSpace($SamAccountName))
+    {
+        return [PSCustomObject]@{
+            Exists = $false
+            SPNs = @()
+        }
+    }
+
+    try
+    {
+        $searcher = [adsisearcher]"samAccountName=$SamAccountName"
+        $searcher.PropertiesToLoad.Add("serviceprincipalname") | Out-Null
+        $obj = $searcher.FindOne()
+        if ($obj)
+        {
+            $exists = $true
+            $adSpns = $obj.properties.Item('serviceprincipalname')
+            if ($adSpns)
+            {
+                foreach ($adSpn in $adSpns)
+                {
+                    $spns += [string]$adSpn
+                }
+            }
+        }
+    }
+    catch
+    {
+    }
+
+    return [PSCustomObject]@{
+        Exists = $exists
+        SPNs = $spns
+    }
+}
+
+Function Get-SPFISqlServerInventory
+{
+    if ($script:SqlServerInventory)
+    {
+        return $script:SqlServerInventory
+    }
+
+    $inventory = @()
+    $dbServers = ($script:spDatabases | ForEach-Object { $_.Parent.Server.Address }) | Sort-Object | Get-Unique
+    foreach ($dbServer in $dbServers)
+    {
+        $spDbs = @($script:spDatabases | Where-Object { ($_.Parent.Server.Name -eq $dbServer) -or ($_.Parent.Server.Address -eq $dbServer) })
+        if ($spDbs.Count -lt 1)
+        {
+            continue
+        }
+
+        $spDb = $spDbs[0]
+        $sqlTransportAuth = Invoke-SPSqlCommand -spDatabase $spDb -query "SELECT net_transport, auth_scheme FROM sys.dm_exec_connections WHERE session_id = @@SPID" -ErrorAction SilentlyContinue
+        $sqlIdentity = Invoke-SPSqlCommand -spDatabase $spDb -query "SELECT CAST(SERVERPROPERTY('ServerName') as nvarchar(256)) AS ServerName, CAST(SERVERPROPERTY('MachineName') as nvarchar(256)) AS MachineName, CAST(ISNULL(SERVERPROPERTY('InstanceName'),'MSSQLSERVER') as nvarchar(256)) AS InstanceName" -ErrorAction SilentlyContinue
+        $sqlServicesRaw = Invoke-SPSqlCommand -spDatabase $spDb -query "SELECT servicename, startup_type_desc, status_desc, service_account, instant_file_initialization_enabled FROM sys.dm_server_services" -ErrorAction SilentlyContinue
+
+        $sqlServices = @()
+        foreach ($svc in @($sqlServicesRaw))
+        {
+            $sqlServices += [PSCustomObject]@{
+                ServiceName = [string]$svc.servicename
+                StartupType = [string]$svc.startup_type_desc
+                Status = [string]$svc.status_desc
+                ServiceAccount = [string]$svc.service_account
+                InstantFileInitializationEnabled = [string]$svc.instant_file_initialization_enabled
+            }
+        }
+
+        $serviceAccounts = @($sqlServices | Where-Object { -not [string]::IsNullOrWhiteSpace($_.ServiceAccount) } | Select-Object -ExpandProperty ServiceAccount -Unique)
+        $dataSources = @($spDbs | ForEach-Object { [string]$_.NormalizedDataSource } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+
+        $inventory += [PSCustomObject]@{
+            Key = [string]$dbServer
+            SPDatabase = $spDb
+            SPDatabases = $spDbs
+            DataSources = $dataSources
+            NetTransport = [string]$sqlTransportAuth.net_transport
+            AuthScheme = [string]$sqlTransportAuth.auth_scheme
+            ReportedServerName = [string]$sqlIdentity.ServerName
+            MachineName = [string]$sqlIdentity.MachineName
+            InstanceName = [string]$sqlIdentity.InstanceName
+            Services = $sqlServices
+            ServiceAccounts = $serviceAccounts
+        }
+    }
+
+    $script:SqlServerInventory = $inventory
+    return $inventory
+}
+
 Function Get-SPDiagnosticKerberosFindings
 {
     $KerberosFindings = New-DiagnosticFinding -Name "Kerberos configuration" -InputObject $null -Format List
-    $KerberosFindings.Description += "- This check reviews Kerberos encryption settings for SharePoint managed accounts (from Active Directory attribute msDS-SupportedEncryptionTypes) and farm servers (registry Policy and LSA Kerberos keys).<br/> - Windows updates in recent years tightened Kerberos defaults toward AES128/AES256 and away from RC4/DES, so accounts and server policy should be aligned with AES support."
+    $KerberosFindings.Description += "- This check reviews Kerberos encryption settings for SharePoint managed accounts (from Active Directory attribute msDS-SupportedEncryptionTypes), farm servers (registry Policy and LSA Kerberos keys), and SQL Server service identities/SPNs discovered from SharePoint database connections.<br/> - Windows updates in recent years tightened Kerberos defaults toward AES128/AES256 and away from RC4/DES, so accounts and server policy should be aligned with AES support."
 
     if (!(IsElevated))
     {
@@ -7595,6 +7751,11 @@ Function Get-SPDiagnosticKerberosFindings
     $serversChecked     = 0
     $serversWeak        = 0
     $policyLsaMismatch  = 0
+    $sqlTargetsChecked = 0
+    $sqlServiceAccountsChecked = 0
+    $sqlServiceAccountsWithoutSpns = 0
+    $sqlTargetsWithMissingExpectedSpns = 0
+    $sqlKerberosRows = @()
 
     # ---------------------------------------------------------------------------------------------
     # [1/2] SharePoint Managed Accounts: AES support (msDS-SupportedEncryptionTypes) and SPNs
@@ -7702,24 +7863,10 @@ Function Get-SPDiagnosticKerberosFindings
         $srvSpns = @()
         $serverSam = "$($Server.Name)$"
 
-        try
+        $serverSpnLookup = Get-SPFIAdSpnsBySamAccountName -SamAccountName $serverSam
+        if ($serverSpnLookup.Exists)
         {
-            $serverSearcher = [adsisearcher]"samAccountName=$serverSam"
-            $serverSearcher.PropertiesToLoad.Add("serviceprincipalname") | Out-Null
-            $serverObj = $serverSearcher.FindOne()
-        }
-        catch
-        {
-            $serverObj = $null
-        }
-
-        if ($serverObj)
-        {
-            $ServerSPNs = $serverObj.properties.Item('serviceprincipalname')
-            if ($ServerSPNs)
-            {
-                foreach ($sSpn in $ServerSPNs) { $srvSpns += [string]$sSpn }
-            }
+            $srvSpns = @($serverSpnLookup.SPNs)
         }
         else
         {
@@ -7817,6 +7964,189 @@ Function Get-SPDiagnosticKerberosFindings
     }
 
     # ---------------------------------------------------------------------------------------------
+    # [3/3] SQL targets: SQL service identities + SQL SPN coverage from AD
+    # ---------------------------------------------------------------------------------------------
+    $sqlInventory = Get-SPFISqlServerInventory
+    foreach ($sqlTarget in $sqlInventory)
+    {
+        $sqlTargetsChecked++
+        $sqlServerKey = [string]$sqlTarget.Key
+        $machineName = [string]$sqlTarget.MachineName
+        if ([string]::IsNullOrWhiteSpace($machineName))
+        {
+            $machineName = (Get-SPFISqlDataSourceParts -DataSource $sqlServerKey).HostShort
+        }
+        if ($machineName -match '\.')
+        {
+            $machineName = $machineName.Split('.')[0]
+        }
+
+        $machineSam = if ([string]::IsNullOrWhiteSpace($machineName)) { $null } else { "$machineName$" }
+        $serverSpnLookup = Get-SPFIAdSpnsBySamAccountName -SamAccountName $machineSam
+        $sqlServerSpns = @($serverSpnLookup.SPNs)
+
+        if ($sqlServerSpns.Count -gt 0)
+        {
+            $spnGroups += [PSCustomObject]@{
+                Scope = "SQL Server"
+                Owner = $machineName
+                Count = $sqlServerSpns.Count
+                SPN   = ($sqlServerSpns -join '~~~BR~~~')
+                Type  = (($sqlServerSpns | ForEach-Object { ($_ -split '/')[0] }) -join '~~~BR~~~')
+            }
+        }
+
+        $accountSpnMap = @{}
+        foreach ($serviceAccount in @($sqlTarget.ServiceAccounts))
+        {
+            if ([string]::IsNullOrWhiteSpace($serviceAccount)) { continue }
+            $sqlServiceAccountsChecked++
+            $accountKey = [string]$serviceAccount
+            if ($accountSpnMap.ContainsKey($accountKey)) { continue }
+
+            $lookupSam = $null
+            if ($serviceAccount -match '^[^\\]+\\(.+)$')
+            {
+                $domainPart = $Matches[0].Split('\', 2)[0]
+                $namePart = $Matches[0].Split('\', 2)[1]
+                if (($domainPart -ieq 'NT AUTHORITY') -or ($domainPart -ieq 'NT SERVICE'))
+                {
+                    $lookupSam = $machineSam
+                }
+                else
+                {
+                    $lookupSam = $namePart
+                }
+            }
+            elseif ($serviceAccount -ieq 'LocalSystem')
+            {
+                $lookupSam = $machineSam
+            }
+            elseif (($serviceAccount -ieq 'Network Service') -or ($serviceAccount -ieq 'Local Service'))
+            {
+                $lookupSam = $machineSam
+            }
+
+            $svcSpnLookup = Get-SPFIAdSpnsBySamAccountName -SamAccountName $lookupSam
+            $svcSpns = @($svcSpnLookup.SPNs)
+            $accountSpnMap[$accountKey] = $svcSpns
+
+            if ($svcSpns.Count -eq 0)
+            {
+                $sqlServiceAccountsWithoutSpns++
+                $warn = $true
+            }
+
+            if ($svcSpns.Count -gt 0)
+            {
+                $spnGroups += [PSCustomObject]@{
+                    Scope = "SQL Service Account"
+                    Owner = $serviceAccount
+                    Count = $svcSpns.Count
+                    SPN   = ($svcSpns -join '~~~BR~~~')
+                    Type  = (($svcSpns | ForEach-Object { ($_ -split '/')[0] }) -join '~~~BR~~~')
+                }
+            }
+        }
+
+        $expectedSpns = @()
+        $candidateSources = @($sqlTarget.DataSources)
+        if ([string]::IsNullOrWhiteSpace($sqlServerKey) -eq $false) { $candidateSources += $sqlServerKey }
+        if ([string]::IsNullOrWhiteSpace($sqlTarget.ReportedServerName) -eq $false) { $candidateSources += [string]$sqlTarget.ReportedServerName }
+        if ([string]::IsNullOrWhiteSpace($sqlTarget.MachineName) -eq $false) { $candidateSources += [string]$sqlTarget.MachineName }
+        $candidateSources = @($candidateSources | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+
+        foreach ($source in $candidateSources)
+        {
+            $parts = Get-SPFISqlDataSourceParts -DataSource $source
+            if ([string]::IsNullOrWhiteSpace($parts.Host)) { continue }
+            if ([string]::IsNullOrWhiteSpace($parts.Instance) -or ($parts.Instance -ieq "MSSQLSERVER"))
+            {
+                $expectedSpns += "MSSQLSvc/$($parts.Host)"
+            }
+            else
+            {
+                $expectedSpns += "MSSQLSvc/$($parts.Host):$($parts.Instance)"
+            }
+            if (-not [string]::IsNullOrWhiteSpace($parts.Port))
+            {
+                $expectedSpns += "MSSQLSvc/$($parts.Host):$($parts.Port)"
+            }
+        }
+        $expectedSpns = @($expectedSpns | Select-Object -Unique)
+
+        $observedSpns = @($sqlServerSpns)
+        foreach ($svcAccountSpns in $accountSpnMap.Values)
+        {
+            $observedSpns += @($svcAccountSpns)
+        }
+        $observedSpns = @($observedSpns | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+
+        $missingExpectedSpns = @()
+        foreach ($expectedSpn in $expectedSpns)
+        {
+            $exactMatchCount = @($observedSpns | Where-Object { $_ -ieq $expectedSpn }).Count
+            if ($exactMatchCount -eq 0)
+            {
+                $suffix = ""
+                if ($expectedSpn -match '^MSSQLSvc\/[^:]+(:.+)$')
+                {
+                    $suffix = [string]$Matches[1]
+                }
+
+                $hostToken = $null
+                if ($expectedSpn -match '^MSSQLSvc\/([^:]+)')
+                {
+                    $hostToken = [string]$Matches[1]
+                }
+
+                $altMatchCount = 0
+                if (-not [string]::IsNullOrWhiteSpace($hostToken))
+                {
+                    $altMatchCount = @($observedSpns | Where-Object {
+                        ($_ -imatch ("^MSSQLSvc/{0}\..*" -f [regex]::Escape($hostToken))) -and
+                        ($suffix -eq "" -or $_ -imatch ([regex]::Escape($suffix) + '$'))
+                    }).Count
+                }
+
+                if ($altMatchCount -eq 0)
+                {
+                    $missingExpectedSpns += $expectedSpn
+                }
+            }
+        }
+
+        $rowStatusState = "good"
+        $rowStatusText = "OK"
+        if ($missingExpectedSpns.Count -gt 0)
+        {
+            $rowStatusState = "bad"
+            $rowStatusText = "Missing MSSQLSvc SPN(s)"
+            $sqlTargetsWithMissingExpectedSpns++
+            $warn = $true
+        }
+        elseif ($accountSpnMap.Keys.Count -eq 0)
+        {
+            $rowStatusState = "warn"
+            $rowStatusText = "No SQL service accounts discovered"
+            $warn = $true
+        }
+
+        $serviceAccountDisplay = @($accountSpnMap.Keys) | Select-Object -Unique
+        $sqlKerberosRows += [PSCustomObject]@{
+            "SQL Target" = $sqlServerKey
+            "Resolved SQL Server" = if ([string]::IsNullOrWhiteSpace($sqlTarget.ReportedServerName)) { $machineName } else { [string]$sqlTarget.ReportedServerName }
+            "Auth Scheme" = [string]$sqlTarget.AuthScheme
+            "SQL Service Account(s)" = if ($serviceAccountDisplay.Count -gt 0) { ($serviceAccountDisplay -join '~~~BR~~~') } else { "Unavailable" }
+            "Account SPN Count" = (@($accountSpnMap.Values | ForEach-Object { $_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique).Count)
+            "Server SPN Count" = $sqlServerSpns.Count
+            "Expected MSSQLSvc SPNs" = if ($expectedSpns.Count -gt 0) { ($expectedSpns -join '~~~BR~~~') } else { "None" }
+            "Missing MSSQLSvc SPNs" = if ($missingExpectedSpns.Count -gt 0) { ($missingExpectedSpns -join '~~~BR~~~') } else { "None" }
+            "Status" = (New-KPill $rowStatusState $rowStatusText)
+        }
+    }
+
+    # ---------------------------------------------------------------------------------------------
     # Warning banner (kept from the original console version) + reference link
     # ---------------------------------------------------------------------------------------------
     $KerberosFindings.ReferenceLink += "https://learn.microsoft.com/en-us/sharepoint/troubleshoot/security/configuration-to-support-kerberos-aes-encryption"
@@ -7827,7 +8157,7 @@ Function Get-SPDiagnosticKerberosFindings
     {
         $KerberosFindings.Severity = [SPDiagnostics.Severity]::Warning
         $warnHtml  = '<div class="warning-message">'
-        $warnHtml += 'One or more Kerberos issues were detected (an account missing AES, a server allowing RC4/DES, or a Policy/LSA mismatch). Review the highlighted rows below. Since the November 2022 Security Updates, Windows enforces AES128/AES256 encryption of Kerberos tickets; this must be explicitly allowed for each account that authenticates with Kerberos.'
+        $warnHtml += 'One or more Kerberos issues were detected (an account missing AES, a server allowing RC4/DES, a Policy/LSA mismatch, or missing SQL MSSQLSvc SPN coverage). Review the highlighted rows below. Since the November 2022 Security Updates, Windows enforces AES128/AES256 encryption of Kerberos tickets; this must be explicitly allowed for each account that authenticates with Kerberos.'
         $warnHtml += '</div>'
         $KerberosFindings.Description += $warnHtml
     }
@@ -7838,6 +8168,8 @@ Function Get-SPDiagnosticKerberosFindings
     if ($accountsMissingAes -gt 0) { $accMissingCell  = New-KPill 'bad' $accountsMissingAes } else { $accMissingCell  = New-KPill 'good' '0' }
     if ($serversWeak -gt 0)        { $serversWeakCell = New-KPill 'bad' $serversWeak }         else { $serversWeakCell = New-KPill 'good' '0' }
     if ($policyLsaMismatch -gt 0)  { $mismatchCell    = New-KPill 'bad' $policyLsaMismatch }   else { $mismatchCell    = New-KPill 'good' '0' }
+    if ($sqlTargetsWithMissingExpectedSpns -gt 0) { $sqlSpnGapCell = New-KPill 'bad' $sqlTargetsWithMissingExpectedSpns } else { $sqlSpnGapCell = New-KPill 'good' '0' }
+    if ($sqlServiceAccountsWithoutSpns -gt 0)     { $sqlSvcNoSpnCell = New-KPill 'bad' $sqlServiceAccountsWithoutSpns }  else { $sqlSvcNoSpnCell = New-KPill 'good' '0' }
     if ($warn)                     { $overallCell     = New-KPill 'warn' 'Review recommended' } else { $overallCell    = New-KPill 'good' 'Healthy' }
 
     $summaryRows = @(
@@ -7846,6 +8178,10 @@ Function Get-SPDiagnosticKerberosFindings
         [PSCustomObject]@{ Metric = 'Farm Servers Checked';         Value = [string]$serversChecked }
         [PSCustomObject]@{ Metric = 'Servers Allowing RC4 / DES';   Value = $serversWeakCell }
         [PSCustomObject]@{ Metric = 'Policy vs LSA Mismatches';     Value = $mismatchCell }
+        [PSCustomObject]@{ Metric = 'SQL Targets Checked';           Value = [string]$sqlTargetsChecked }
+        [PSCustomObject]@{ Metric = 'SQL Service Accounts Checked';  Value = [string]$sqlServiceAccountsChecked }
+        [PSCustomObject]@{ Metric = 'SQL Accounts Without SPNs';     Value = $sqlSvcNoSpnCell }
+        [PSCustomObject]@{ Metric = 'SQL Targets Missing MSSQLSvc SPN(s)'; Value = $sqlSpnGapCell }
         [PSCustomObject]@{ Metric = 'Overall Assessment';           Value = $overallCell }
     )
 
@@ -7857,6 +8193,12 @@ Function Get-SPDiagnosticKerberosFindings
 
     $srvFinding = New-DiagnosticFinding -Name "Server OS Kerberos Encryption Policy (Registry)" -InputObject $serverRows -Format Table -Description "Compares Kerberos encryption settings from both registry locations on each farm server: <br/><br/>  - 'HKLM\$PolicyKeyPath' (GPO policy) vs. 'HKLM\$LsaKeyPath' (LSA runtime/effective).<br/><br/> 'Policy = LSA' should be Yes; No or Partial means configured policy and effective state differ."
     $KerberosFindings.ChildFindings.Add($srvFinding)
+
+    if ($sqlKerberosRows.Count -gt 0)
+    {
+        $sqlKerbFinding = New-DiagnosticFinding -Name "SQL Kerberos and SPN Coverage" -InputObject $sqlKerberosRows -Format Table -Description "Correlates SharePoint SQL targets with SQL service accounts (sys.dm_server_services), current SQL auth scheme, and expected/observed MSSQLSvc SPNs from Active Directory."
+        $KerberosFindings.ChildFindings.Add($sqlKerbFinding)
+    }
 
     if ($spnGroups.Count -gt 0)
     {
@@ -13532,26 +13874,35 @@ Function Get-SPDiagnosticSQLFindings()
 {
     $SQLServersFinding = New-DiagnosticFinding -Name "SQL Servers" -InputObject $null -Format List
 
-    $dbServers = ($script:spDatabases  | ForEach-Object {$_.parent.server.Address})  | Sort-Object | Get-Unique
-    foreach ($dbServer in $DBServers)
+    $sqlServerInventory = Get-SPFISqlServerInventory
+    foreach ($sqlServer in $sqlServerInventory)
     {
-        $SPDBs = ($script:spDatabases | Where-Object {$_.parent.server.name -eq $dbserver})
+        $dbServer = $sqlServer.Key
+        $spDb = $sqlServer.SPDatabase
+        $SPDBs = $sqlServer.SPDatabases
         if ($SPDBs)
         {
             $SQLServerData = New-Object PSObject
             
             # SQL Server versions
-            $SPDB = $SPDBs[0]           
-            $SQLServerData  | add-member -memberType NoteProperty -name "SQL Server Version" -value $((Invoke-SPSqlCommand -spDatabase $spdb -query "SELECT @@version")[0] ) -ErrorAction SilentlyContinue
+            $SQLServerData  | add-member -memberType NoteProperty -name "SQL Server Version" -value $((Invoke-SPSqlCommand -spDatabase $spDb -query "SELECT @@version")[0] ) -ErrorAction SilentlyContinue
             
             #sql Protocol and Authentication
-            $sql_transport_auth = Invoke-SPSqlCommand -spDatabase $spdb -query "SELECT net_transport, auth_scheme FROM sys.dm_exec_connections WHERE session_id = @@SPID" -ErrorAction SilentlyContinue
-            
-            $SQLServerData  | add-member -memberType NoteProperty -name "Net_Transport" -value $sql_transport_auth.net_transport
-            $SQLServerData  | add-member -memberType NoteProperty -name "Auth_Scheme" -value  $sql_transport_auth.auth_scheme
+            $SQLServerData  | add-member -memberType NoteProperty -name "Net_Transport" -value $sqlServer.NetTransport
+            $SQLServerData  | add-member -memberType NoteProperty -name "Auth_Scheme" -value  $sqlServer.AuthScheme
+
+            $serviceAccounts = @($sqlServer.ServiceAccounts)
+            if ($serviceAccounts.Count -gt 0)
+            {
+                $SQLServerData  | add-member -memberType NoteProperty -name "SQL Service Account(s)" -value ($serviceAccounts -join ', ')
+            }
+            else
+            {
+                $SQLServerData  | add-member -memberType NoteProperty -name "SQL Service Account(s)" -value "Unable to query sys.dm_server_services"
+            }
 
             # SQL Server Cluster
-            $ClusterNodes = (Invoke-SPSqlCommand -spDatabase $spdb -query "Select * from sys.dm_os_cluster_nodes with (NOLOCK)" -ErrorAction SilentlyContinue)
+            $ClusterNodes = (Invoke-SPSqlCommand -spDatabase $spDb -query "Select * from sys.dm_os_cluster_nodes with (NOLOCK)" -ErrorAction SilentlyContinue)
             if ($Null -eq $ClusterNodes)
             {
                 $SQLServerData  | add-member -memberType NoteProperty -name "Cluster" -value "SQL Server is not running as part of a Cluster"
@@ -13568,6 +13919,13 @@ Function Get-SPDiagnosticSQLFindings()
             if($sqlAccountPermsFinding.Severity -ge [SPDiagnostics.Severity]::Informational)
             {
                 $SQLServerFinding.ChildFindings.Add($sqlAccountPermsFinding)
+            }
+
+            $sqlServices = @($sqlServer.Services)
+            if ($sqlServices.Count -gt 0)
+            {
+                $sqlServicesFinding = New-DiagnosticFinding -Name "SQL Services" -InputObject $sqlServices -Format Table
+                $SQLServerFinding.ChildFindings.Add($sqlServicesFinding)
             }
 
             $SQLServersFinding.ChildFindings.add(($SQLServerFinding))
