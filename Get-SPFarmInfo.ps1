@@ -137,7 +137,7 @@ if([System.IntPtr]::Size -lt 8)
     exit
 }
 
-$ScriptVersion="4.3.2611.2500"
+$ScriptVersion="4.3.2611.1100"
 $script:PreviousFindingTime= Get-Date
 
 # Retrieve parameters information
@@ -8382,13 +8382,9 @@ function Get-SPDiagnosticSearchFindings
             $ssaFindings.WarningMessage+="<li>In order to perform this action, please run the following command: </li>" 
             $ssaFindings.WarningMessage+="<ul style='color:#ffd700'><div class=`"code`">`Upgrade-SPEnterpriseSearchServiceApplication '$ssaName'</div></ul>"
         }
-        if($ssa.CloudIndex -eq $True)
+        if($ssa.CloudIndex -eq $true)
         {
-            $spoProxy = Get-SPServiceApplicationProxy | Where-Object{$_.TypeName -match "SharePoint Online Application Principal Management Service"}
-            $spoTenantUri = $spoProxy.OnlineTenantUri.AbsoluteUri
-            $ssaFindings.Description+="<li style='color:#ffffff'>We have detected this is a Cloud SSA.</li>"
-            $ssaFindings.Description+="<li style='color:#ffffff'>The SPO Tenant is: </li>"
-            $ssaFindings.Description+="<ul style='color:#ffd700'>  $spoTenantUri</ul>"
+            $ssaFindings.Description += '- We have detected this is a Cloud SSA and FYI, the searchable items is expected to be "0" in this type SSA.<br/>- We no longer store the SPO Tenant URL as we submit through graph calls to SPOONS now and we only expose the TenantID.<br/> - The SPO tenant ID is: {0}' -f $ssa.ScsAuthRealm
         }
 
         # Task 544: change search to opt-in experience
@@ -8761,12 +8757,29 @@ function Get-MSSCrawlStatHistory
 
     $crawlHistoryFinding = New-DiagnosticFinding -Name "Crawl History Stats (top 200)" -InputObject $null -format table
 
+    # Map ContentSourceID -> Content Source Name so output is readable in the crawl history table.
+    $contentSourceNameById = @{}
+    try
+    {
+        foreach ($contentSource in @(Get-SPEnterpriseSearchCrawlContentSource -SearchApplication $searchApplication -ErrorAction SilentlyContinue))
+        {
+            if ($null -ne $contentSource -and $null -ne $contentSource.Id)
+            {
+                $contentSourceNameById[[string]$contentSource.Id] = [string]$contentSource.Name
+            }
+        }
+    }
+    catch
+    {
+    }
+
     $crawlStatqueryText = @"
 DECLARE @Count int = 200;
 DECLARE @ContentSourceID int = -1;
 
 SELECT 
     CrawlStats.CrawlID                                                       AS CrawlID,
+    CrawlStats.ContentSourceID                                                AS ContentSourceID,
     CASE (CASE CrawlStats.CrawlID WHEN 1 THEN 8 ELSE History.CrawlType END)
         WHEN 1 THEN 'Full'
         WHEN 2 THEN 'Incremental'
@@ -8774,10 +8787,18 @@ SELECT
         WHEN 8 THEN 'Continuous'
         ELSE 'Unknown'
     END                                                                       AS CrawlType,
-    CrawlStats.ContentSourceID                                                AS ContentSourceID,
-    CASE CrawlStats.CrawlID
-        WHEN 1 THEN 4
-        ELSE History.Status
+    CASE (CASE CrawlStats.CrawlID WHEN 1 THEN 4 ELSE History.Status END)
+        WHEN 4 THEN 'Running'
+        WHEN 11 THEN 'Completed'
+        WHEN 12 THEN 'Stopped'
+        WHEN 9 THEN 'Paused'
+        WHEN 8 THEN 'Pausing'
+        WHEN 7 THEN 'Resuming'
+        WHEN 1 THEN 'Starting'
+        WHEN 5 THEN 'Start Failed'
+        WHEN 14 THEN 'Completing'
+        WHEN 13 THEN 'Stopping'
+        ELSE 'Unknown'
     END                                                                       AS Status,
     CrawlStats.CrawlStartTime                                                 AS CrawlStartTime,
     CASE CrawlStats.CrawlID
@@ -8862,7 +8883,27 @@ LEFT OUTER JOIN MSSCrawlHistory History
             $obj = [PSCustomObject]@{}
 
             foreach ($col in $columns) {
-                $obj | Add-Member -NotePropertyName $col -NotePropertyValue $reader[$col]
+                $value = $reader[$col]
+                if ($col -eq "ContentSourceID")
+                {
+                    $lookupKey = [string]$value
+                    $nameValue = $null
+                    if ($contentSourceNameById.ContainsKey($lookupKey))
+                    {
+                        $nameValue = $contentSourceNameById[$lookupKey]
+                    }
+
+                    if ([string]::IsNullOrWhiteSpace($nameValue))
+                    {
+                        $nameValue = $lookupKey
+                    }
+
+                    $obj | Add-Member -NotePropertyName "ContentSource" -NotePropertyValue $nameValue
+                }
+                else
+                {
+                    $obj | Add-Member -NotePropertyName $col -NotePropertyValue $value
+                }
             }
 
             $fulldata += $obj
